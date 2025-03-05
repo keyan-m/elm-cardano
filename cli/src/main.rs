@@ -39,6 +39,10 @@ struct MakeSubCommand {
     /// specify the name of the resulting JS file.
     output: String,
 
+    #[argh(option)]
+    /// specify "--report json" to get error messages as JSON
+    report: Option<String>,
+
     #[argh(switch)]
     /// turn on the time-travelling debugger. It allows you to rewind and replay events.
     /// The events can be imported/exported into a file,
@@ -147,10 +151,17 @@ fn make_subcommand(make_args: MakeSubCommand) -> anyhow::Result<()> {
         cmd.arg("--optimize");
     }
 
+    // Add report format if specified
+    if let Some(report_value) = &make_args.report {
+        cmd.arg("--report").arg(report_value);
+    }
+
     // Execute the command and stream output
     let status = cmd.status().context("Failed to execute elm make command")?;
     if !status.success() {
-        anyhow::bail!("Compilation failed!")
+        // The elm compiler failed, let’s just exit without any additional info
+        // to not mess with potential json --report going to stderr.
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     // Read the elm compiled file
