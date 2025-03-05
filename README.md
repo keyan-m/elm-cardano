@@ -76,6 +76,25 @@ More examples are available in the `examples/` dir of the repo.
 More information about this project is also available
 in the different documents in the `docs/` dir of the repo.
 
+## Adding elm-cardano to an existing Elm project
+
+If you have an already existing Elm project,
+instructions are in the `docs/from-elm-to-elm-cardano.md` file.
+
+## FAQ
+
+There is a dedicated `docs/FAQ.md` file, answering questions like:
+
+- Why is there an elm-cardano binary?
+- Why isn’t the elm-cardano package published?
+- Why isn’t it possible to compile with --optimize?
+- Why does elm-cardano have its own JS loader?
+- What is the interop story with other JS tools?
+- Does elm-cardano have an emulator?
+- Is elm-cardano usable with a local testnet?
+- How to use an API provider with elm-cardano?
+- Is elm-cardano usable in the Backend?
+
 ## Contributions
 
 Contributions are very welcomed! For now things are moving fast so I suggest
@@ -125,8 +144,6 @@ Many thanks to all people who contributed code and ideas to elm-cardano.
 Many thanks to the person (they know who they are) who contributed the logo.
 
 ## Maintainer notes
-
-Don’t forget to update the version tag in the quickstart instructions
 
 Cargo-dist TLDR:
 ```sh
