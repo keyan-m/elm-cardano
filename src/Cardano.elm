@@ -1264,19 +1264,23 @@ preProcessIntents txIntents =
                     }
 
                 MintBurn { policyId, assets, scriptWitness } ->
+                    let
+                        filteredAssets =
+                            assets |> Map.filter (Integer.isZero >> not)
+                    in
                     case scriptWitness of
                         NativeWitness { script, expectedSigners } ->
                             { preProcessedIntents
                                 | nativeScriptSources = script :: preProcessedIntents.nativeScriptSources
                                 , expectedSigners = expectedSigners :: preProcessedIntents.expectedSigners
-                                , mints = { policyId = policyId, assets = assets, redeemer = Nothing } :: preProcessedIntents.mints
+                                , mints = { policyId = policyId, assets = filteredAssets, redeemer = Nothing } :: preProcessedIntents.mints
                             }
 
                         PlutusWitness { script, redeemerData, requiredSigners } ->
                             { preProcessedIntents
                                 | plutusScriptSources = script :: preProcessedIntents.plutusScriptSources
                                 , requiredSigners = requiredSigners :: preProcessedIntents.requiredSigners
-                                , mints = { policyId = policyId, assets = assets, redeemer = Just redeemerData } :: preProcessedIntents.mints
+                                , mints = { policyId = policyId, assets = filteredAssets, redeemer = Just redeemerData } :: preProcessedIntents.mints
                             }
 
                 WithdrawRewards { stakeCredential, amount, scriptWitness } ->
