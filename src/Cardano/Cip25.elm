@@ -1,6 +1,6 @@
 module Cardano.Cip25 exposing
-    ( Cip25
-    , File, Image(..), ImageMime, MimeType, Uri, Version
+    ( AssetMetadata, Cip25
+    , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -12,7 +12,7 @@ a standard format for metadata of minting transactions so that off-chain tools
 can associate a set of information with the tokens originating (or updating) in
 that transaction.
 
-@docs Cip25
+@docs Cip25, PolicyMetadata, AssetMetadata
 
 @docs File, Image, ImageMime, MimeType, Uri, Version
 
@@ -21,22 +21,41 @@ that transaction.
 
 -}
 
+import Bytes.Map exposing (BytesMap)
 import Cardano.Metadatum exposing (Metadatum)
+import Cardano.MultiAsset exposing (AssetName, PolicyId)
 import Dict exposing (Dict)
 
 
 {-| Datatype for modeling CIP-0025.
 
-The standard simply lays out a set of fields, some of which are optional.
+CIP-0025 metadata is grouped by policy ID, then by asset name. The `version`
+field applies to the whole label-721 payload, not to each asset.
 
 -}
 type alias Cip25 =
+    { version : Version
+    , policies : BytesMap PolicyId PolicyMetadata
+    }
+
+
+{-| Metadata for all assets under one policy ID.
+-}
+type alias PolicyMetadata =
+    BytesMap AssetName AssetMetadata
+
+
+{-| Metadata for a single asset.
+
+The standard simply lays out a set of fields, some of which are optional.
+
+-}
+type alias AssetMetadata =
     { name : String
     , image : Image
     , mediaType : Maybe ImageMime
     , description : Maybe String
     , files : List File
-    , version : Version
     , otherProps : Dict String Metadatum
     }
 
