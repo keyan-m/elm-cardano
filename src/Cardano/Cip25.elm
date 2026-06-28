@@ -1,6 +1,7 @@
 module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
-    , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version
+    , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
+    , assetMetadata, empty, file, insertAsset, label, singleton, withFile
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -16,15 +17,19 @@ that transaction.
 
 @docs File, Image, ImageMime, MimeType, Uri, Version
 
+@docs empty, singleton, insertAsset, assetMetadata, withFile, file, label
+
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
 @docs mimeTypeFromString, mimeTypeToString
 
 -}
 
-import Bytes.Map exposing (BytesMap)
+import Bytes.Comparable exposing (Bytes)
+import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum exposing (Metadatum)
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
 import Dict exposing (Dict)
+import Natural exposing (Natural)
 
 
 {-| Datatype for modeling CIP-0025.
@@ -36,6 +41,48 @@ field applies to the whole label-721 payload, not to each asset.
 type alias Cip25 =
     { version : Version
     , policies : BytesMap PolicyId PolicyMetadata
+    }
+
+
+{-| CIP-0025 metadata label.
+-}
+label : Natural
+label =
+    Natural.fromSafeInt 721
+
+
+{-| Create empty CIP-0025 metadata for a version.
+-}
+empty : Version -> Cip25
+empty version =
+    { version = version
+    , policies = BytesMap.empty
+    }
+
+
+{-| Create CIP-0025 metadata for one asset.
+-}
+singleton : Version -> Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25
+singleton version policyId assetName metadata =
+    { version = version
+    , policies = BytesMap.singleton policyId (BytesMap.singleton assetName metadata)
+    }
+
+
+{-| Insert or replace one asset's metadata.
+-}
+insertAsset : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25 -> Cip25
+insertAsset policyId assetName metadata cip25 =
+    { cip25
+        | policies =
+            BytesMap.update policyId
+                (\maybePolicyMetadata ->
+                    maybePolicyMetadata
+                        |> Maybe.withDefault BytesMap.empty
+                        |> BytesMap.insert assetName metadata
+                        |> Just
+                )
+                cip25.policies
     }
 
 
@@ -58,6 +105,26 @@ type alias AssetMetadata =
     , files : List File
     , otherProps : Dict String Metadatum
     }
+
+
+{-| Create asset metadata with optional fields empty.
+-}
+assetMetadata : String -> Image -> AssetMetadata
+assetMetadata name image =
+    { name = name
+    , image = image
+    , mediaType = Nothing
+    , description = Nothing
+    , files = []
+    , otherProps = Dict.empty
+    }
+
+
+{-| Add a file to asset metadata.
+-}
+withFile : File -> AssetMetadata -> AssetMetadata
+withFile file_ metadata =
+    { metadata | files = metadata.files ++ [ file_ ] }
 
 
 {-| Helper datatype for the `image` field of CIP-0025.
@@ -93,6 +160,17 @@ type alias File =
     , mediaType : MimeType
     , src : Uri
     , otherProps : Dict String Metadatum
+    }
+
+
+{-| Create file metadata with optional fields empty.
+-}
+file : String -> MimeType -> Uri -> File
+file name mediaType src =
+    { name = name
+    , mediaType = mediaType
+    , src = src
+    , otherProps = Dict.empty
     }
 
 
