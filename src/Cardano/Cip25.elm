@@ -1,6 +1,6 @@
 module Cardano.Cip25 exposing
     ( Cip25
-    , File, Image(..), ImageMime, MimeType, Version
+    , File, Image(..), ImageMime, MimeType, Uri, Version
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -14,7 +14,7 @@ that transaction.
 
 @docs Cip25
 
-@docs File, Image, ImageMime, MimeType, Version
+@docs File, Image, ImageMime, MimeType, Uri, Version
 
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
 @docs mimeTypeFromString, mimeTypeToString
@@ -43,22 +43,21 @@ type alias Cip25 =
 
 {-| Helper datatype for the `image` field of CIP-0025.
 
-The image can be either a URI that points to a resource with MIME type
-`image/*`, or an inline base64-encoded string.
+The image is a URI that points to a resource with MIME type `image/*`.
+Inline images are represented as `data:` URIs.
 
-Should this datatype also support inlined SVG strings? e.g.
-`data:image/svg+xml,%3Csvg width='45' viewBox=... svg%3E`
+TODO: A structured URI model is probably a better design here, so callers can
+inspect URI parts before deciding whether to fetch or render an image.
 
 -}
 type Image
-    = ImageUri
-        { scheme : String
-        , cid : String
-        }
-    | InlineImage
-        { mediaType : ImageMime
-        , base64Encoded : String
-        }
+    = Image Uri
+
+
+{-| Raw URI string.
+-}
+type alias Uri =
+    String
 
 
 {-| Datatype to represent standard's version.
@@ -73,7 +72,7 @@ type Version
 type alias File =
     { name : String
     , mediaType : MimeType
-    , src : String
+    , src : Uri
     , otherProps : Dict String Metadatum
     }
 
