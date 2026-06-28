@@ -1,6 +1,8 @@
 module Cardano.Cip25 exposing
     ( Cip25
-    , File, Image(..), ImageMime(..), MimeType(..), Version
+    , File, Image(..), ImageMime, MimeType, Version
+    , imageMimeFromString, imageMimeToMimeType, imageMimeToString
+    , mimeTypeFromString, mimeTypeToString
     )
 
 {-| CIP-0025 support.
@@ -13,6 +15,9 @@ that transaction.
 @docs Cip25
 
 @docs File, Image, ImageMime, MimeType, Version
+
+@docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
+@docs mimeTypeFromString, mimeTypeToString
 
 -}
 
@@ -29,7 +34,7 @@ type alias Cip25 =
     { name : String
     , image : Image
     , mediaType : Maybe ImageMime
-    , description : String
+    , description : Maybe String
     , files : List File
     , version : Version
     , otherProps : Dict String Metadatum
@@ -56,62 +61,138 @@ type Image
         }
 
 
-{-| Datatype to represent a versioning which is compliant with [schema.org](https://schema.org).
+{-| Datatype to represent standard's version.
 -}
-type alias Version =
-    { primary : Int
-    , secondary : Int
-    }
+type Version
+    = V1
+    | V2
 
 
 {-| Datatype to represent optional files specified for an asset.
 -}
 type alias File =
     { name : String
-    , mediaType : ( MimeType, String )
+    , mediaType : MimeType
     , src : String
     , otherProps : Dict String Metadatum
     }
 
 
-{-| Sum type to represent MIME Content Types listed in [IANA registry](https://iana.org/assignments/media-types/media-types.xhtml).
+{-| A MIME media type, such as `image/png` or `application/json`.
+
+The constructor is intentionally opaque so this type can represent future IANA
+registrations without hard-coding today's registry into the package.
+
 -}
 type MimeType
-    = ApplicationMimeType
-    | AudioMimeType
-    | FontMimeType
-    | ExampleMimeType
-    | ImageMimeType
-    | MessageMimeType
-    | ModelMimeType
-    | MultipartMimeType
-    | TextMimeType
-    | VideoMimeType
+    = MimeType String
 
 
-{-| Dedicated datatype for all image MIME media types according
-to [IANA registry](https://iana.org/assignments/media-types/media-types.xhtml#image).
+{-| Build a MIME media type from a full `type/subtype` string.
 
-Since the `image` field of CIP-0025 is required, and also must be one of the
-image types, this datatype leads to a more robust model with the compromise of
-limited support.
+This validates the two name components and stores the media type in lowercase.
 
-TODO: Adding a custom variant (arbitrary string) will allow two representations
-for defined constructors, however it seems inevitable in order to support
-future image MIMEs. This is also true for [MimeType]'s current implementation.
+-}
+mimeTypeFromString : String -> Maybe MimeType
+mimeTypeFromString value =
+    case String.split "/" value of
+        [ type_, subtype ] ->
+            if isValidMimeTypeName type_ && isValidMimeTypeName subtype then
+                Just (MimeType (String.toLower value))
 
-Also, having this completely decoupled from [MimeType] may not be a great idea.
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+{-| Convert a MIME media type back to its original string representation.
+-}
+mimeTypeToString : MimeType -> String
+mimeTypeToString (MimeType value) =
+    value
+
+
+{-| Check whether a string is a valid registered MIME type name component.
+
+This validates one side of `type/subtype`, such as `image` or `svg+xml`,
+using the [RFC 6838](https://www.iana.org/go/rfc6838) `restricted-name`
+grammar.
+
+-}
+isValidMimeTypeName : String -> Bool
+isValidMimeTypeName name =
+    case String.toList name of
+        [] ->
+            False
+
+        first :: rest ->
+            String.length name <= 127
+                && (((first >= 'A') && (first <= 'Z'))
+                        || ((first >= 'a') && (first <= 'z'))
+                        || ((first >= '0') && (first <= '9'))
+                   )
+                && List.all
+                    (\char ->
+                        ((char >= 'A') && (char <= 'Z'))
+                            || ((char >= 'a') && (char <= 'z'))
+                            || ((char >= '0') && (char <= '9'))
+                            || (char == '!')
+                            || (char == '#')
+                            || (char == '$')
+                            || (char == '&')
+                            || (char == '-')
+                            || (char == '^')
+                            || (char == '_')
+                            || (char == '.')
+                            || (char == '+')
+                    )
+                    rest
+
+
+{-| A MIME media type constrained to the `image/*` top-level type.
+
+The constructor is intentionally opaque for the same reason as [MimeType]:
+image subtypes can be added to the IANA registry over time.
 
 -}
 type ImageMime
-    = Bmp
-    | Gif
-    | Jpeg
-    | Png
-    | SvgXml
-    | Tiff
-    | Vnf_adobe_photoshop
-    | Vnd_dwg
-    | Vnd_dxf
-    | Webp
-    | Wmf
+    = ImageMime String
+
+
+{-| Build an image MIME media type from a full `image/subtype` string.
+
+This validates the two name components and stores the subtype in lowercase.
+
+-}
+imageMimeFromString : String -> Maybe ImageMime
+imageMimeFromString value =
+    case String.split "/" value of
+        [ type_, subtype ] ->
+            if
+                (String.toLower type_ == "image")
+                    && isValidMimeTypeName type_
+                    && isValidMimeTypeName subtype
+            then
+                Just (ImageMime (String.toLower subtype))
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+{-| Convert an image MIME media type into the more general MIME type.
+-}
+imageMimeToMimeType : ImageMime -> MimeType
+imageMimeToMimeType =
+    imageMimeToString >> MimeType
+
+
+{-| Convert an image MIME media type back to its original string representation.
+-}
+imageMimeToString : ImageMime -> String
+imageMimeToString (ImageMime subtype) =
+    "image/" ++ subtype
