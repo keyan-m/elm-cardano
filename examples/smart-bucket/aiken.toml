@@ -1,0 +1,17 @@
+name = "elm-cardano/smart-bucket"
+version = "0.0.0"
+plutus = "v3"
+license = "Apache-2.0"
+description = "Aiken contracts for project 'elm-cardano/smart-bucket'"
+
+[repository]
+user = "elm-cardano"
+project = "elm-cardano"
+platform = "github"
+
+[[dependencies]]
+name = "aiken-lang/stdlib"
+version = "v2.1.0"
+source = "github"
+
+[config]

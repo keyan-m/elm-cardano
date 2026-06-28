@@ -1,10 +1,14 @@
 module Cardano.Utxo exposing
-    ( OutputReference, TransactionId, Output(..), DatumHash, DatumOption(..)
-    , fromLovelace
-    , lovelace, totalLovelace
-    , sortByAscendingLovelace, sortByDescendingLovelace
+    ( OutputReference, TransactionId, Output, DatumHash, DatumOption(..)
+    , RefDict, emptyRefDict, refDictFromList
+    , fromLovelace, simpleOutput
+    , refAsString
+    , lovelace, totalLovelace, compareLovelace, isAdaOnly, isAssetsOnly
+    , minAda, checkMinAda, withMinAda, minAdaForAssets, freeAda, bytesWidth
     , encodeOutputReference, encodeOutput, encodeDatumOption
     , decodeOutputReference, decodeOutput
+    , outputReferenceToData, datumValueFromData
+    , datumOptionToData
     )
 
 {-| Handling outputs.
@@ -15,19 +19,29 @@ module Cardano.Utxo exposing
 @docs OutputReference, TransactionId, Output, DatumHash, DatumOption
 
 
+## Dictionary with [OutputReference] keys
+
+@docs RefDict, emptyRefDict, refDictFromList
+
+
 ## Build
 
-@docs fromLovelace
+@docs fromLovelace, simpleOutput
+
+
+## Display
+
+@docs refAsString
 
 
 ## Query
 
-@docs lovelace, totalLovelace
+@docs lovelace, totalLovelace, compareLovelace, isAdaOnly, isAssetsOnly
 
 
-## Transform
+## Compute
 
-@docs sortByAscendingLovelace, sortByDescendingLovelace
+@docs minAda, checkMinAda, withMinAda, minAdaForAssets, freeAda, bytesWidth
 
 
 ## Convert
@@ -36,19 +50,25 @@ module Cardano.Utxo exposing
 
 @docs decodeOutputReference, decodeOutput
 
+@docs outputReferenceToData, datumValueFromData
+
+@docs datumOptionToData
+
 -}
 
+import Bytes as ElmBytes
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Address)
 import Cardano.Data as Data exposing (Data)
-import Cardano.MultiAsset as MultiAsset
-import Cardano.Script as Script exposing (Script)
+import Cardano.MultiAsset as MultiAsset exposing (MultiAsset)
+import Cardano.Script as Script
 import Cardano.Value as Value exposing (Value)
 import Cbor.Decode as D
-import Cbor.Decode.Extra as DE
+import Cbor.Decode.Extra as D
 import Cbor.Encode as E
-import Cbor.Encode.Extra as EE
 import Cbor.Tag as Tag
+import Dict.Any exposing (AnyDict)
+import Integer as I
 import Natural as N exposing (Natural)
 
 
@@ -65,6 +85,35 @@ This is a Blake2b-256 hash.
 -}
 type TransactionId
     = TransactionId Never
+
+
+{-| Convenience type for `Dict` with [OutputReference] keys.
+
+WARNING: do not compare them with `==` since they contain functions.
+
+-}
+type alias RefDict a =
+    AnyDict ( String, Int ) OutputReference a
+
+
+{-| Convenience empty initialization for `Dict` with [OutputReference] keys.
+
+WARNING: do not compare them with `==` since they contain functions.
+
+-}
+emptyRefDict : RefDict a
+emptyRefDict =
+    Dict.Any.empty (\ref -> ( Bytes.toHex ref.transactionId, ref.outputIndex ))
+
+
+{-| Convenience function to create a `Dict` with [OutputReference] keys from a list.
+
+WARNING: do not compare them with `==` since they contain functions.
+
+-}
+refDictFromList : List ( OutputReference, a ) -> RefDict a
+refDictFromList =
+    Dict.Any.fromList (\ref -> ( Bytes.toHex ref.transactionId, ref.outputIndex ))
 
 
 {-| CBOR encoder for [OutputReference].
@@ -89,18 +138,12 @@ decodeOutputReference =
 
 {-| The content of a eUTxO.
 -}
-type Output
-    = Legacy
-        { address : Address
-        , amount : Value
-        , datumHash : Maybe (Bytes DatumHash)
-        }
-    | PostAlonzo
-        { address : Address
-        , value : Value
-        , datumOption : Maybe DatumOption
-        , referenceScript : Maybe Script
-        }
+type alias Output =
+    { address : Address
+    , amount : Value
+    , datumOption : Maybe DatumOption
+    , referenceScript : Maybe Script.Reference
+    }
 
 
 {-| Phantom type for 32-bytes datum hashes.
@@ -110,41 +153,39 @@ type DatumHash
     = DatumHash_ Never
 
 
-{-| Sorts a list of UTXOs in descending order by lovelace value.
+{-| Compare UTxOs by lovelace value.
 -}
-sortByDescendingLovelace : List Output -> List Output
-sortByDescendingLovelace =
-    List.sortWith (\a b -> N.compare (lovelace b) (lovelace a))
-
-
-{-| Sorts a list of UTXOs in ascending order by lovelace value.
--}
-sortByAscendingLovelace : List Output -> List Output
-sortByAscendingLovelace =
-    List.sortWith (\a b -> N.compare (lovelace a) (lovelace b))
+compareLovelace : Output -> Output -> Order
+compareLovelace a b =
+    N.compare (lovelace a) (lovelace b)
 
 
 {-| Construct an `Output` from an `Address` and a lovelace amount
 -}
 fromLovelace : Address -> Natural -> Output
 fromLovelace address amount =
-    Legacy
-        { address = address
-        , amount = Value.onlyLovelace amount
-        , datumHash = Nothing
-        }
+    simpleOutput address (Value.onlyLovelace amount)
+
+
+{-| Create a simple [Output] with just an [Address] and a [Value].
+-}
+simpleOutput : Address -> Value -> Output
+simpleOutput address value =
+    { address = address, amount = value, datumOption = Nothing, referenceScript = Nothing }
+
+
+{-| Display the [OutputReference] as a String.
+-}
+refAsString : OutputReference -> String
+refAsString { transactionId, outputIndex } =
+    Bytes.toHex transactionId ++ " #" ++ String.fromInt outputIndex
 
 
 {-| Extract the amount of lovelace in an `Output`
 -}
 lovelace : Output -> Natural
 lovelace output =
-    case output of
-        Legacy legacyOutput ->
-            legacyOutput.amount.lovelace
-
-        PostAlonzo postAlonzoOutput ->
-            postAlonzoOutput.value.lovelace
+    output.amount.lovelace
 
 
 {-| Calculate the total number of lovelace in a collection of `Output`
@@ -154,60 +195,154 @@ totalLovelace =
     List.foldr (\output total -> N.add (lovelace output) total) N.zero
 
 
+{-| Check if the output contains only Ada.
+Nothing else is allowed, no tokens, no datum, no ref script.
+-}
+isAdaOnly : Output -> Bool
+isAdaOnly { amount, datumOption, referenceScript } =
+    (amount.assets == MultiAsset.empty)
+        && (datumOption == Nothing)
+        && (referenceScript == Nothing)
+
+
+{-| Check if the output contains only assets (Ada or tokens).
+Datums and ref scripts are not allowed.
+-}
+isAssetsOnly : Output -> Bool
+isAssetsOnly { datumOption, referenceScript } =
+    (datumOption == Nothing)
+        && (referenceScript == Nothing)
+
+
+{-| Computes the bytes width of the output if we encode it to CBOR.
+-}
+bytesWidth : Output -> Int
+bytesWidth output =
+    E.encode (encodeOutput output)
+        |> ElmBytes.width
+
+
+{-| Amount of Ada Lovelace "free" in the output,
+meaning the amount above the minimum required for the output.
+-}
+freeAda : Output -> Natural
+freeAda output =
+    N.sub output.amount.lovelace <| minAda output
+
+
+{-| Compute minimum Ada lovelace for a given [Output].
+
+Since the size of the lovelace field may impact minAda,
+we adjust its value to something 32bits,
+before adjusting again if it becomes >= 2^32.
+
+The formula is given by CIP 55,
+with current value of `4310` for `coinsPerUTxOByte`.
+
+TODO: provide `coinsPerUTxOByte` in function arguments?
+
+-}
+minAda : Output -> Natural
+minAda ({ amount } as output) =
+    let
+        -- Make sure lovelace is encoded with exactly 32 bits (so >= 2^16).
+        -- Because 2^16 would correspond to 0.065 min Ada,
+        -- which is not currently possible (famous last words).
+        updatedOutput =
+            { output | amount = { amount | lovelace = N.fromSafeInt <| 2 ^ 16 } }
+    in
+    -- minAda is not going to overflow 32 bits,
+    -- because it would mean that its over 4294 min ada.
+    -- It’s not currently possible, and unlikely to increase that much in the future.
+    N.fromSafeInt ((160 + bytesWidth updatedOutput) * 4310)
+
+
+{-| Check that an [Output] has enough ada to cover its size.
+-}
+checkMinAda : Output -> Result String Output
+checkMinAda output =
+    let
+        outputMinAda =
+            minAda output
+    in
+    if lovelace output |> N.isGreaterThanOrEqual outputMinAda then
+        Ok output
+
+    else
+        Err ("Output has less ada than its required min ada (" ++ N.toString outputMinAda ++ "):\n" ++ Debug.toString output)
+
+
+{-| Modify an Output to have the minimum ada necessary,
+considering the rest of the output (assets, datum, etc.).
+-}
+withMinAda : Output -> Output
+withMinAda output =
+    { output | amount = { lovelace = minAda output, assets = output.amount.assets } }
+
+
+{-| Compute minimum Ada lovelace for a given [MultiAsset] that would be sent to a given address.
+
+TODO: provide `coinsPerUTxOByte` in function arguments?
+
+-}
+minAdaForAssets : Address -> MultiAsset Natural -> Natural
+minAdaForAssets address assets =
+    simpleOutput address { lovelace = N.fromSafeInt <| 2 ^ 16, assets = assets }
+        |> minAda
+
+
 {-| CBOR encoder for [Output].
 -}
 encodeOutput : Output -> E.Encoder
 encodeOutput output =
-    case output of
-        Legacy fields ->
-            E.tuple
-                (E.elems
-                    >> E.elem Address.toCbor .address
-                    >> E.elem Value.encode .amount
-                    >> E.optionalElem Bytes.toCbor .datumHash
+    E.record E.int
+        (E.fields
+            >> E.field 0 Address.toCbor .address
+            >> E.field 1 Value.encode .amount
+            >> E.optionalField 2 encodeDatumOption .datumOption
+            >> E.optionalField 3
+                (Script.refBytes
+                    >> Bytes.toBytes
+                    >> E.tagged Tag.Cbor E.bytes
                 )
-                fields
-
-        PostAlonzo fields ->
-            E.record E.int
-                (E.fields
-                    >> E.field 0 Address.toCbor .address
-                    >> E.field 1 Value.encode .value
-                    >> E.optionalField 2 encodeDatumOption .datumOption
-                    >> E.optionalField 3
-                        (Script.encodeScript
-                            >> E.encode
-                            >> E.tagged Tag.Cbor E.bytes
-                        )
-                        .referenceScript
-                )
-                fields
+                .referenceScript
+        )
+        output
 
 
 {-| Nickname for data stored in a eUTxO.
 -}
 type DatumOption
     = DatumHash (Bytes DatumHash)
-    | Datum Data
+    | DatumValue { rawBytes : Bytes Data }
+
+
+{-| Create a DatumOption with a value from a Data object.
+-}
+datumValueFromData : Data -> DatumOption
+datumValueFromData datum =
+    DatumValue { rawBytes = Data.toCborUplc datum |> E.encode |> Bytes.fromBytes }
 
 
 {-| CBOR encoder for [DatumOption].
 -}
 encodeDatumOption : DatumOption -> E.Encoder
 encodeDatumOption datumOption =
-    EE.ledgerList identity <|
+    E.list identity <|
         case datumOption of
             DatumHash hash ->
                 [ E.int 0
                 , Bytes.toCbor hash
                 ]
 
-            Datum datum ->
+            DatumValue datum ->
                 [ E.int 1
-                , datum
-                    |> Data.toCbor
-                    |> E.encode
-                    |> E.tagged Tag.Cbor E.bytes
+
+                -- , datum
+                --     |> Data.toCborUplc
+                --     |> E.encode
+                --     |> E.tagged Tag.Cbor E.bytes
+                , E.tagged Tag.Cbor E.bytes <| Bytes.toBytes datum.rawBytes
                 ]
 
 
@@ -216,16 +351,115 @@ encodeDatumOption datumOption =
 decodeOutput : D.Decoder Output
 decodeOutput =
     let
-        legacyOutputBuilder address amount =
-            Legacy
-                { address = address
-                , amount = { lovelace = amount, assets = MultiAsset.empty }
-                , datumHash = Nothing
-                }
+        preBabbageBuilder address amount optionalDatum =
+            { address = address
+            , amount = amount
+            , datumOption = optionalDatum
+            , referenceScript = Nothing
+            }
+
+        preBabbage =
+            D.tuple preBabbageBuilder <|
+                D.elems
+                    -- Address
+                    >> D.elem Address.decode
+                    -- Coin value (lovelace)
+                    >> D.elem Value.fromCbor
+                    -- ? datum_hash : $hash32
+                    >> D.optionalElem (D.map (DatumHash << Bytes.fromBytes) D.bytes)
+
+        postBabbage =
+            D.record D.int Output <|
+                D.fields
+                    -- Address
+                    >> D.field 0 Address.decode
+                    -- Coin value (lovelace)
+                    >> D.field 1 Value.fromCbor
+                    -- ? datum_hash : $hash32
+                    >> D.optionalField 2 datumOptionFromCbor
+                    -- ? 3 : script_ref   ; New; script reference
+                    >> D.optionalField 3 decodeScriptRef
     in
-    D.tuple legacyOutputBuilder <|
-        D.elems
-            -- Address
-            >> D.elem Address.decode
-            -- Coin value (lovelace)
-            >> D.elem DE.natural
+    D.oneOf [ preBabbage, postBabbage, D.failWith "Fail to decode output" ]
+
+
+{-| Decode a doubly CBOR encoded script for the output `script_ref` field.
+
+    script_ref = #6.24(bytes .cbor script)
+
+-}
+decodeScriptRef : D.Decoder Script.Reference
+decodeScriptRef =
+    D.tagged Tag.Cbor D.bytes
+        |> D.andThen
+            (\( _, scriptCbor ) ->
+                case Script.refFromBytes (Bytes.fromBytes scriptCbor) of
+                    Just scriptRef ->
+                        D.succeed scriptRef
+
+                    Nothing ->
+                        D.fail
+            )
+
+
+datumOptionFromCbor : D.Decoder DatumOption
+datumOptionFromCbor =
+    D.length
+        |> D.ignoreThen D.int
+        |> D.andThen
+            (\tag ->
+                case tag of
+                    0 ->
+                        D.map (DatumHash << Bytes.fromBytes) D.bytes
+
+                    1 ->
+                        D.map (\rawBytes -> DatumValue { rawBytes = rawBytes }) decodeOutputDatum
+
+                    _ ->
+                        D.failWith ("Unknown datum option tag: " ++ String.fromInt tag)
+            )
+
+
+{-| Decode a doubly CBOR encoded plutus data for the output datum.
+
+    data = #6.24(bytes .cbor plutus_data)
+
+-}
+decodeOutputDatum : D.Decoder (Bytes Data)
+decodeOutputDatum =
+    D.tagged Tag.Cbor D.bytes
+        |> D.andThen
+            (\( _, datumCbor ) ->
+                case D.decode Data.fromCbor datumCbor of
+                    Just _ ->
+                        D.succeed (Bytes.fromBytes datumCbor)
+
+                    Nothing ->
+                        D.fail
+            )
+
+
+{-| [Data] encoder function for [OutputReference].
+-}
+outputReferenceToData : OutputReference -> Data
+outputReferenceToData outRef =
+    Data.Constr
+        N.zero
+        [ Data.Bytes <| Bytes.toAny outRef.transactionId
+        , Data.Int <| I.fromSafeInt outRef.outputIndex
+        ]
+
+
+{-| Convert a DatumOption into it’s Plutus Data representation.
+-}
+datumOptionToData : Maybe DatumOption -> Data
+datumOptionToData maybeDatum =
+    case maybeDatum of
+        Nothing ->
+            Data.Constr N.zero []
+
+        Just (DatumHash hash) ->
+            Data.Constr N.one [ Data.Bytes <| Bytes.toAny hash ]
+
+        Just (DatumValue { rawBytes }) ->
+            Data.Constr N.two [ Data.Bytes <| Bytes.toAny rawBytes ]

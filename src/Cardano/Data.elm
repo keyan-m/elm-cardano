@@ -1,36 +1,116 @@
-module Cardano.Data exposing (Data(..), fromCbor, toCbor)
+module Cardano.Data exposing
+    ( Data(..), hash, rawDatumHash, fromBytes, fromCbor, toCbor, toCborUplc
+    , maybe
+    )
 
 {-| Handling Cardano Data objects.
 
-@docs Data, fromCbor, toCbor
+@docs Data, hash, rawDatumHash, fromBytes, fromCbor, toCbor, toCborUplc
+
+@docs maybe
 
 -}
 
 import Bytes.Comparable as Bytes exposing (Any, Bytes)
 import Cbor exposing (CborItem(..))
 import Cbor.Decode as D
+import Cbor.Decode.Extra as DE
 import Cbor.Encode as E
 import Cbor.Encode.Extra as EE
 import Cbor.Tag as Tag
+import Integer exposing (Integer)
+import Natural exposing (Natural)
 
 
-{-| A Data is an opaque compound type that can represent any possible user-defined type in Aiken.
-
-TODO: make Data actually opaque.
-
+{-| A Data is a compound type that can represent any possible user-defined type in Aiken.
 -}
 type Data
-    = Constr Int (List Data)
+    = Constr Natural (List Data)
     | Map (List ( Data, Data ))
     | List (List Data)
-    | Int Int
+    | Int Integer
     | Bytes (Bytes Any)
+
+
+{-| Compute the Blake2b-256 (32 bytes) hash of a Data object.
+-}
+hash : Data -> Bytes a
+hash data =
+    -- Use toCborUplc to encode correctly the Data before hashing
+    E.encode (toCborUplc data)
+        |> Bytes.fromBytes
+        |> Bytes.blake2b256
+
+
+{-| Helper function to compute the Blake2b-256 hash of the raw Data bytes in a UTxO datum.
+-}
+rawDatumHash : Bytes Data -> Bytes a
+rawDatumHash rawData =
+    Bytes.blake2b256 rawData
+
+
+{-| Helper function to decode a Data object from its raw CBOR bytes.
+-}
+fromBytes : Bytes a -> Maybe Data
+fromBytes bytes =
+    Bytes.toBytes bytes
+        |> D.decode fromCbor
 
 
 {-| CBOR encoder for [Data].
 -}
 toCbor : Data -> E.Encoder
 toCbor data =
+    case data of
+        Constr ixNat fields ->
+            if ixNat |> Natural.isLessThan (Natural.fromSafeInt 128) then
+                let
+                    ix =
+                        Natural.toInt ixNat
+                in
+                if ix < 7 then
+                    E.tagged (Tag.Unknown <| 121 + ix) (E.list toCbor) fields
+
+                else
+                    E.tagged (Tag.Unknown <| 1280 + ix - 7) (E.list toCbor) fields
+
+            else
+                E.tagged (Tag.Unknown 102)
+                    (E.tuple <|
+                        E.elems
+                            >> E.elem EE.natural .ixNat
+                            >> E.elem (E.list toCbor) .fields
+                    )
+                    { ixNat = ixNat, fields = fields }
+
+        Map xs ->
+            EE.associativeList toCbor toCbor xs
+
+        List xs ->
+            E.list toCbor xs
+
+        Int i ->
+            EE.integer i
+
+        Bytes bytes ->
+            if Bytes.width bytes <= 64 then
+                E.bytes (Bytes.toBytes bytes)
+
+            else
+                E.sequence <|
+                    EE.beginBytes
+                        :: List.foldr
+                            (\chunk rest -> E.bytes (Bytes.toBytes chunk) :: rest)
+                            [ E.break ]
+                            (Bytes.chunksOf 64 bytes)
+
+
+{-| CBOR encoder for [Data].
+Only to be used for things sent to the UPLC VM,
+such as datums, redeemers, and script parameter application.
+-}
+toCborUplc : Data -> E.Encoder
+toCborUplc data =
     let
         -- NOTE: 'Data' lists are weirdly encoded:
         --
@@ -43,46 +123,38 @@ toCbor data =
                     E.length 0
 
                 _ ->
-                    E.indefiniteList toCbor xs
+                    EE.indefiniteList toCborUplc xs
     in
     case data of
-        Constr ix fields ->
-            if 0 <= ix && ix < 7 then
-                E.tagged (Tag.Unknown <| 121 + ix) encodeList fields
+        Constr ixNat fields ->
+            if ixNat |> Natural.isLessThan (Natural.fromSafeInt 128) then
+                let
+                    ix =
+                        Natural.toInt ixNat
+                in
+                if ix < 7 then
+                    E.tagged (Tag.Unknown <| 121 + ix) encodeList fields
 
-            else if 7 <= ix && ix < 128 then
-                E.tagged (Tag.Unknown <| 1280 + ix - 7) encodeList fields
+                else
+                    E.tagged (Tag.Unknown <| 1280 + ix - 7) encodeList fields
 
             else
                 E.tagged (Tag.Unknown 102)
                     (E.tuple <|
                         E.elems
-                            >> E.elem E.int .ix
+                            >> E.elem EE.natural .ixNat
                             >> E.elem encodeList .fields
                     )
-                    { ix = ix, fields = fields }
+                    { ixNat = ixNat, fields = fields }
 
         Map xs ->
-            EE.ledgerAssociativeList toCbor toCbor xs
+            EE.associativeList toCborUplc toCborUplc xs
 
         List xs ->
             encodeList xs
 
-        -- NOTE: Technically, Plutus allows to encode arbitrarily large
-        -- integers. It tries to encode them as CBOR basic int when possible,
-        -- and otherwise default to bytes tagged as Positive or Negative
-        -- 'BigNum'.
-        --
-        -- Yet in Elm / JavaScript, we only truly support ints in the range of
-        -- -2^53, 2^53-1; which is well within the values that can be encoded
-        -- as plain CBOR int.
-        --
-        -- Similarly for decoding, we cannot decode larger ints value _anyway_,
-        -- unless we start using a BigInt library. For the purpose of this
-        -- particular SDK, we currently make the choice of simply not supporting
-        -- large ints. We may revise that choice if a use-case is made.
         Int i ->
-            E.int i
+            EE.integer i
 
         Bytes bytes ->
             if Bytes.width bytes <= 64 then
@@ -90,7 +162,7 @@ toCbor data =
 
             else
                 E.sequence <|
-                    E.beginBytes
+                    EE.beginBytes
                         :: List.foldr
                             (\chunk rest -> E.bytes (Bytes.toBytes chunk) :: rest)
                             [ E.break ]
@@ -115,6 +187,8 @@ fromCbor =
 
 fromCborItem : CborItem -> Maybe Data
 fromCborItem item =
+    -- TODO: make more tail-rec,
+    -- but would require difficult inlining of collectCborPairs and collectCborItems
     case item of
         CborMap xs ->
             collectCborPairs [] xs |> Maybe.map Map
@@ -122,18 +196,47 @@ fromCborItem item =
         CborList xs ->
             collectCborItems [] xs |> Maybe.map List
 
-        CborInt i ->
-            Just (Int i)
+        CborInt32 i ->
+            Just (Int (Integer.fromSafeInt i))
+
+        CborInt64 ( msb, lsb ) ->
+            let
+                bigMsb =
+                    Integer.fromSafeInt msb
+                        |> Integer.mul (Integer.fromSafeInt 4294967296)
+
+                bigLsb =
+                    Integer.fromSafeInt lsb
+            in
+            if msb >= 0 then
+                Just (Int (Integer.add bigMsb bigLsb))
+
+            else
+                Just (Int (Integer.sub bigMsb bigLsb))
 
         CborBytes bs ->
             Just (Bytes <| Bytes.fromBytes bs)
 
+        CborTag Tag.PositiveBigNum _ ->
+            E.encode (E.any item)
+                |> D.decode DE.integer
+                |> Maybe.map Int
+
+        CborTag Tag.NegativeBigNum _ ->
+            E.encode (E.any item)
+                |> D.decode DE.integer
+                |> Maybe.map Int
+
         CborTag (Tag.Unknown n) tagged ->
             if n == 102 then
                 case tagged of
-                    CborList [ CborInt ix, CborList fields ] ->
-                        collectCborItems [] fields
-                            |> Maybe.map (Constr ix)
+                    CborList [ ixItem, CborList fields ] ->
+                        case ( unwrapCborUint ixItem, collectCborItems [] fields ) of
+                            ( Just ix, Just items ) ->
+                                Just (Constr ix items)
+
+                            _ ->
+                                Nothing
 
                     _ ->
                         Nothing
@@ -150,10 +253,39 @@ fromCborItem item =
                                     n - 121
                         in
                         collectCborItems [] fields
-                            |> Maybe.map (Constr ix)
+                            |> Maybe.map (Constr <| Natural.fromSafeInt ix)
 
                     _ ->
                         Nothing
+
+        _ ->
+            Nothing
+
+
+unwrapCborUint : CborItem -> Maybe Natural
+unwrapCborUint item =
+    case item of
+        CborInt32 i ->
+            if i >= 0 then
+                Just (Natural.fromSafeInt i)
+
+            else
+                Nothing
+
+        CborInt64 ( msb, lsb ) ->
+            if msb >= 0 then
+                let
+                    bigMsb =
+                        Natural.fromSafeInt msb
+                            |> Natural.mul (Natural.fromSafeInt 4294967296)
+
+                    bigLsb =
+                        Natural.fromSafeInt lsb
+                in
+                Just (Natural.add bigMsb bigLsb)
+
+            else
+                Nothing
 
         _ ->
             Nothing
@@ -166,15 +298,12 @@ collectCborPairs st pairs =
             Just (List.reverse st)
 
         ( left, right ) :: tail ->
-            fromCborItem left
-                |> Maybe.andThen
-                    (\l ->
-                        fromCborItem right
-                            |> Maybe.andThen
-                                (\r ->
-                                    collectCborPairs (( l, r ) :: st) tail
-                                )
-                    )
+            case ( fromCborItem left, fromCborItem right ) of
+                ( Just l, Just r ) ->
+                    collectCborPairs (( l, r ) :: st) tail
+
+                _ ->
+                    Nothing
 
 
 collectCborItems : List Data -> List CborItem -> Maybe (List Data)
@@ -184,5 +313,25 @@ collectCborItems st items =
             Just (List.reverse st)
 
         head :: tail ->
-            fromCborItem head
-                |> Maybe.andThen (\s -> collectCborItems (s :: st) tail)
+            case fromCborItem head of
+                Just s ->
+                    collectCborItems (s :: st) tail
+
+                Nothing ->
+                    Nothing
+
+
+
+-- Helper functions
+
+
+{-| Helper function to encode as Data an optional value.
+-}
+maybe : Maybe Data -> Data
+maybe maybeData =
+    case maybeData of
+        Just data ->
+            Constr Natural.zero [ data ]
+
+        Nothing ->
+            Constr Natural.one []

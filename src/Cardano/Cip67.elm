@@ -60,7 +60,7 @@ Finally, a complete CIP-0067 example:
 
     spacebudz2921 : Maybe Cip67
     spacebudz2921 =
-        Maybe.andThen Cip67.fromBytes <| Bytes.fromString "000de14042756432393231"
+        Maybe.andThen Cip67.fromBytes <| Bytes.fromHex "000de14042756432393231"
 
     -- Just { assetName = Bytes "42756432393231", label = 222 }
 
@@ -87,13 +87,13 @@ fromBytes : Bytes MultiAsset.AssetName -> Maybe Cip67
 fromBytes tnBytes =
     let
         tnString =
-            Bytes.toString tnBytes
+            Bytes.toHex tnBytes
     in
     labelFromHex (String.left 8 tnString)
         |> Maybe.map
             (\label ->
                 { label = label
-                , assetName = Bytes.fromStringUnchecked <| String.dropLeft 8 tnString
+                , assetName = Bytes.fromHexUnchecked <| String.dropLeft 8 tnString
                 }
             )
 
@@ -114,10 +114,10 @@ labelFromHex fullLabelStr =
                 String.slice 1 -1 fullLabelStr
 
             labelBytes =
-                Bytes.fromStringUnchecked <| String.left 4 labelWithChecksum
+                Bytes.fromHexUnchecked <| String.left 4 labelWithChecksum
 
             checksumBytes =
-                Bytes.fromStringUnchecked <| String.right 2 labelWithChecksum
+                Bytes.fromHexUnchecked <| String.right 2 labelWithChecksum
         in
         if Crc8.digest labelBytes == checksumBytes then
             BD.decode (BD.unsignedInt16 Bytes.BE) (Bytes.toBytes labelBytes)
@@ -141,8 +141,8 @@ fromCbor =
 -}
 toBytes : Cip67 -> Bytes MultiAsset.AssetName
 toBytes { label, assetName } =
-    (labelToHex label ++ Bytes.toString assetName)
-        |> Bytes.fromStringUnchecked
+    (labelToHex label ++ Bytes.toHex assetName)
+        |> Bytes.fromHexUnchecked
 
 
 {-| Convert an Int label into its CIP-0067 hex string.
@@ -155,9 +155,9 @@ labelToHex label =
                 |> Bytes.fromBytes
 
         checksumStr =
-            Bytes.toString <| Crc8.digest labelBytes
+            Bytes.toHex <| Crc8.digest labelBytes
     in
-    "0" ++ Bytes.toString labelBytes ++ checksumStr ++ "0"
+    "0" ++ Bytes.toHex labelBytes ++ checksumStr ++ "0"
 
 
 {-| CBOR encoder.

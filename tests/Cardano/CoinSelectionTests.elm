@@ -2,9 +2,9 @@ module Cardano.CoinSelectionTests exposing (..)
 
 import Bytes.Comparable as Bytes
 import Cardano.Address as Address exposing (Address, NetworkId(..))
-import Cardano.CoinSelection as CoinSelection exposing (Error(..), largestFirst)
-import Cardano.Utxo exposing (Output, fromLovelace, totalLovelace)
-import Cardano.Value exposing (onlyLovelace)
+import Cardano.CoinSelection as CoinSelection exposing (Error(..), inOrderedList, largestFirst)
+import Cardano.Utxo exposing (Output, OutputReference, fromLovelace)
+import Cardano.Value as Value exposing (Value, onlyLovelace)
 import Expect exposing (Expectation)
 import Fuzz exposing (Fuzzer)
 import Fuzz.Extra
@@ -17,29 +17,59 @@ import Test.Distribution as Distribution
 suite : Test
 suite =
     describe "CoinSelection"
-        [ describe "largestFirst"
-            [ test "basic scenario" <| basicScenarioTest
-            , test "no utxos" <| noOutputsTest
-            , test "insufficient funds" <| insufficientFundsTest
-            , test "single utxo, single output, equal value" <| singleUtxoSingleOutputEqualValueTest
-            , test "target zero, already selected output" <| targetZeroAlreadySelectedOutputTest
-            , fuzzCoinSelection "coverage of payments" propCoverageOfPayment
-            , fuzzCoinSelection "correctness of change" propCorrectnessOfChange
+        -- Ada only tests
+        [ describe "largestFirst ada only"
+            [ test "basic scenario" <| largestBasicScenarioTest
+            , test "no utxos" <| noOutputsTest largestFirst
+            , test "insufficient funds" <| largestInsufficientFundsTest
+            , test "single utxo, single output, equal value" <| singleUtxoSingleOutputEqualValueTest largestFirst
+            , test "target zero, already selected output" <| targetZeroAlreadySelectedOutputTest largestFirst
+            , fuzzCoinSelection "coverage of payments" <| propCoverageOfPayment largestFirst
+            , fuzzCoinSelection "correctness of change" <| propCorrectnessOfChange largestFirst
+            ]
+        , describe "inOrderedList ada only"
+            [ test "basic scenario" <| orderedBasicScenarioTest
+            , test "no utxos" <| noOutputsTest inOrderedList
+            , test "insufficient funds" <| orderedInsufficientFundsTest
+            , test "single utxo, single output, equal value" <| singleUtxoSingleOutputEqualValueTest inOrderedList
+            , test "target zero, already selected output" <| targetZeroAlreadySelectedOutputTest inOrderedList
+            , fuzzCoinSelection "coverage of payments" <| propCoverageOfPayment inOrderedList
+            , fuzzCoinSelection "correctness of change" <| propCorrectnessOfChange inOrderedList
+            ]
+
+        -- MultiAsset tests
+        , describe "largestFirst MultiAsset"
+            [ test "basic scenario" <| largestBasicScenarioMultiAssetTest
+            , test "no utxos" <| noOutputsMultiAssetTest largestFirst
+            , test "insufficient funds" <| largestInsufficientFundsMultiAssetTest
+            , test "single utxo, single output, equal value" <| singleUtxoSingleOutputEqualValueMultiAssetTest largestFirst
+            , test "target zero, already selected output" <| targetZeroAlreadySelectedOutputMultiAssetTest largestFirst
+            ]
+        , describe "inOrderedList MultiAsset"
+            [ test "basic scenario" <| orderedBasicScenarioMultiAssetTest
+            , test "no utxos" <| noOutputsMultiAssetTest inOrderedList
+            , test "insufficient funds" <| orderedInsufficientFundsMultiAssetTest
+            , test "single utxo, single output, equal value" <| singleUtxoSingleOutputEqualValueMultiAssetTest inOrderedList
+            , test "target zero, already selected output" <| targetZeroAlreadySelectedOutputMultiAssetTest inOrderedList
             ]
         ]
 
 
-basicScenarioTest : a -> Expectation
-basicScenarioTest _ =
+
+-- Ada only
+
+
+largestBasicScenarioTest : a -> Expectation
+largestBasicScenarioTest _ =
     let
         context =
-            { availableOutputs =
+            { availableUtxos =
                 [ output "1" 50
                 , output "2" 30
                 , output "3" 20
                 ]
-            , alreadySelectedOutputs = []
-            , targetAmount = N.fromSafeInt 30
+            , alreadySelectedUtxos = []
+            , targetAmount = onlyLovelace <| N.fromSafeInt 30
             }
 
         maxInputCount =
@@ -47,7 +77,7 @@ basicScenarioTest _ =
 
         expectedResult =
             Ok
-                { selectedOutputs = [ output "1" 50 ]
+                { selectedUtxos = [ output "1" 50 ]
                 , change = Just <| onlyLovelace (N.fromSafeInt 20)
                 }
     in
@@ -55,24 +85,50 @@ basicScenarioTest _ =
         |> Expect.equal expectedResult
 
 
-noOutputsTest : a -> Expectation
-noOutputsTest _ =
+orderedBasicScenarioTest : a -> Expectation
+orderedBasicScenarioTest _ =
     let
         context =
-            { availableOutputs = []
-            , alreadySelectedOutputs = []
-            , targetAmount = N.fromSafeInt 30
+            { availableUtxos =
+                [ output "1" 20
+                , output "2" 30
+                , output "3" 50
+                ]
+            , alreadySelectedUtxos = []
+            , targetAmount = onlyLovelace <| N.fromSafeInt 30
+            }
+
+        maxInputCount =
+            5
+
+        expectedResult =
+            Ok
+                { selectedUtxos = [ output "2" 30, output "1" 20 ]
+                , change = Just <| onlyLovelace (N.fromSafeInt 20)
+                }
+    in
+    inOrderedList maxInputCount context
+        |> Expect.equal expectedResult
+
+
+noOutputsTest : CoinSelection.Algorithm -> a -> Expectation
+noOutputsTest selectionAlgo _ =
+    let
+        context =
+            { availableUtxos = []
+            , alreadySelectedUtxos = []
+            , targetAmount = onlyLovelace <| N.fromSafeInt 30
             }
 
         maxInputCount =
             5
     in
-    largestFirst maxInputCount context
-        |> Expect.equal (Err UTxOBalanceInsufficient)
+    selectionAlgo maxInputCount context
+        |> Expect.equal (Err <| UTxOBalanceInsufficient { selectedUtxos = [], missingValue = context.targetAmount })
 
 
-insufficientFundsTest : a -> Expectation
-insufficientFundsTest _ =
+largestInsufficientFundsTest : a -> Expectation
+largestInsufficientFundsTest _ =
     let
         availableOutputs =
             [ output "1" 5
@@ -80,24 +136,52 @@ insufficientFundsTest _ =
             ]
 
         context =
-            { availableOutputs = availableOutputs
-            , alreadySelectedOutputs = []
-            , targetAmount = N.fromSafeInt 30
+            { availableUtxos = availableOutputs
+            , alreadySelectedUtxos = []
+            , targetAmount = onlyLovelace <| N.fromSafeInt 30
             }
-
-        result =
-            largestFirst 5 context
     in
-    Expect.equal (Err UTxOBalanceInsufficient) result
+    largestFirst 5 context
+        |> Expect.equal
+            (Err <|
+                UTxOBalanceInsufficient
+                    { selectedUtxos = availableOutputs
+                    , missingValue = onlyLovelace <| N.fromSafeInt 15
+                    }
+            )
 
 
-singleUtxoSingleOutputEqualValueTest : a -> Expectation
-singleUtxoSingleOutputEqualValueTest _ =
+orderedInsufficientFundsTest : a -> Expectation
+orderedInsufficientFundsTest _ =
+    let
+        availableOutputs =
+            [ output "1" 5
+            , output "2" 10
+            ]
+
+        context =
+            { availableUtxos = availableOutputs
+            , alreadySelectedUtxos = []
+            , targetAmount = onlyLovelace <| N.fromSafeInt 30
+            }
+    in
+    inOrderedList 5 context
+        |> Expect.equal
+            (Err <|
+                UTxOBalanceInsufficient
+                    { selectedUtxos = List.reverse availableOutputs
+                    , missingValue = onlyLovelace <| N.fromSafeInt 15
+                    }
+            )
+
+
+singleUtxoSingleOutputEqualValueTest : CoinSelection.Algorithm -> a -> Expectation
+singleUtxoSingleOutputEqualValueTest algorithm _ =
     let
         context =
-            { availableOutputs = [ output "1" 10 ]
-            , alreadySelectedOutputs = []
-            , targetAmount = N.fromSafeInt 10
+            { availableUtxos = [ output "1" 10 ]
+            , alreadySelectedUtxos = []
+            , targetAmount = onlyLovelace <| N.fromSafeInt 10
             }
 
         maxInputCount =
@@ -105,21 +189,21 @@ singleUtxoSingleOutputEqualValueTest _ =
 
         expectedResult =
             Ok
-                { selectedOutputs = context.availableOutputs
+                { selectedUtxos = context.availableUtxos
                 , change = Nothing
                 }
     in
-    largestFirst maxInputCount context
+    algorithm maxInputCount context
         |> Expect.equal expectedResult
 
 
-targetZeroAlreadySelectedOutputTest : a -> Expectation
-targetZeroAlreadySelectedOutputTest _ =
+targetZeroAlreadySelectedOutputTest : CoinSelection.Algorithm -> a -> Expectation
+targetZeroAlreadySelectedOutputTest algorithm _ =
     let
         context =
-            { availableOutputs = []
-            , alreadySelectedOutputs = [ output "1" 1 ]
-            , targetAmount = N.zero
+            { availableUtxos = []
+            , alreadySelectedUtxos = [ output "1" 1 ]
+            , targetAmount = Value.zero
             }
 
         maxInputCount =
@@ -127,11 +211,11 @@ targetZeroAlreadySelectedOutputTest _ =
 
         expectedResult =
             Ok
-                { selectedOutputs = [ output "1" 1 ]
+                { selectedUtxos = [ output "1" 1 ]
                 , change = Just <| onlyLovelace (N.fromSafeInt 1)
                 }
     in
-    largestFirst maxInputCount context
+    algorithm maxInputCount context
         |> Expect.equal expectedResult
 
 
@@ -139,14 +223,16 @@ targetZeroAlreadySelectedOutputTest _ =
 -- Fixtures
 
 
-output : String -> Int -> Output
+output : String -> Int -> ( OutputReference, Output )
 output addrSuffix amount =
-    fromLovelace (address addrSuffix) (N.fromSafeInt amount)
+    ( OutputReference (Bytes.fromHexUnchecked "addrSuffix") 0
+    , fromLovelace (address addrSuffix) (N.fromSafeInt amount)
+    )
 
 
 address : String -> Address
 address suffix =
-    Bytes.fromStringUnchecked ("addr" ++ suffix)
+    Bytes.fromHexUnchecked ("addr" ++ suffix)
         |> Address.enterprise Testnet
 
 
@@ -173,9 +259,9 @@ contextFuzzer : Int -> Fuzzer CoinSelection.Context
 contextFuzzer maxInputCount =
     let
         outputFuzzer =
-            Fuzz.map2 fromLovelace
-                (Fuzz.int |> Fuzz.map (\i -> address <| "_" ++ String.fromInt i))
-                Fuzz.Extra.strictPositiveNatural
+            Fuzz.map2 output
+                (Fuzz.map String.fromInt Fuzz.int)
+                (Fuzz.intAtLeast 1)
     in
     Fuzz.map3 CoinSelection.Context
         (Fuzz.frequency
@@ -188,7 +274,7 @@ contextFuzzer maxInputCount =
             , ( 9, Fuzz.constant [] )
             ]
         )
-        Fuzz.Extra.natural
+        (Fuzz.map onlyLovelace Fuzz.Extra.natural)
 
 
 contextDistribution : Int -> Test.Distribution CoinSelection.Context
@@ -200,11 +286,11 @@ contextDistribution maxInputCount =
           )
         , ( Distribution.atLeast 80
           , "no already selected outputs"
-          , \ctx -> ctx.alreadySelectedOutputs |> List.isEmpty
+          , \ctx -> ctx.alreadySelectedUtxos |> List.isEmpty
           )
         , ( Distribution.atLeast 5
           , "already selected outputs"
-          , \ctx -> ctx.alreadySelectedOutputs |> List.isEmpty |> not
+          , \ctx -> ctx.alreadySelectedUtxos |> List.isEmpty |> not
           )
         ]
 
@@ -213,30 +299,215 @@ contextDistribution maxInputCount =
 -- Properties
 
 
-propCoverageOfPayment : Int -> CoinSelection.Context -> Expectation
-propCoverageOfPayment maxInputCount context =
-    case largestFirst maxInputCount context of
+propCoverageOfPayment : CoinSelection.Algorithm -> Int -> CoinSelection.Context -> Expectation
+propCoverageOfPayment algorithm maxInputCount context =
+    case algorithm maxInputCount context of
         Err _ ->
             Expect.pass
 
-        Ok { selectedOutputs } ->
-            totalLovelace selectedOutputs
+        Ok { selectedUtxos } ->
+            Value.sum (List.map (Tuple.second >> .amount) selectedUtxos)
                 -- |> Expect.atLeast context.targetAmount
-                |> N.isGreaterThanOrEqual context.targetAmount
+                |> Value.atLeast context.targetAmount
                 |> Expect.equal True
 
 
-propCorrectnessOfChange : Int -> CoinSelection.Context -> Expectation
-propCorrectnessOfChange maxInputCount context =
-    case largestFirst maxInputCount context of
+propCorrectnessOfChange : CoinSelection.Algorithm -> Int -> CoinSelection.Context -> Expectation
+propCorrectnessOfChange algorithm maxInputCount context =
+    case algorithm maxInputCount context of
         Err _ ->
             Expect.pass
 
-        Ok { selectedOutputs, change } ->
+        Ok { selectedUtxos, change } ->
             let
                 changeAmount =
-                    Maybe.map .lovelace change
-                        |> Maybe.withDefault N.zero
+                    Maybe.withDefault Value.zero change
             in
-            totalLovelace selectedOutputs
-                |> Expect.equal (N.add changeAmount context.targetAmount)
+            Value.sum (List.map (Tuple.second >> .amount) selectedUtxos)
+                |> Expect.equal (Value.add changeAmount context.targetAmount)
+
+
+
+-- MultiAsset
+
+
+largestBasicScenarioMultiAssetTest : a -> Expectation
+largestBasicScenarioMultiAssetTest _ =
+    let
+        context =
+            { availableUtxos =
+                [ asset "1" "policy" "name" 30
+                , asset "2" "policy" "name" 20
+                , asset "3" "policy" "name" 70
+                , asset "4" "policy" "name" 10
+                ]
+            , alreadySelectedUtxos = []
+            , targetAmount = token "policy" "name" 30
+            }
+
+        maxInputCount =
+            5
+
+        expectedResult =
+            Ok
+                { selectedUtxos = [ asset "3" "policy" "name" 70 ]
+                , change = Just (token "policy" "name" 40)
+                }
+    in
+    largestFirst maxInputCount context
+        |> Expect.equal expectedResult
+
+
+orderedBasicScenarioMultiAssetTest : a -> Expectation
+orderedBasicScenarioMultiAssetTest _ =
+    let
+        context =
+            { availableUtxos =
+                [ asset "1" "policy" "name" 20
+                , asset "2" "policy" "name" 30
+                , asset "3" "policy" "name" 70
+                , asset "4" "policy" "name" 10
+                ]
+            , alreadySelectedUtxos = []
+            , targetAmount = token "policy" "name" 30
+            }
+
+        maxInputCount =
+            5
+
+        expectedResult =
+            Ok
+                { selectedUtxos = [ asset "2" "policy" "name" 30, asset "1" "policy" "name" 20 ]
+                , change = Just (token "policy" "name" 20)
+                }
+    in
+    inOrderedList maxInputCount context
+        |> Expect.equal expectedResult
+
+
+noOutputsMultiAssetTest : CoinSelection.Algorithm -> a -> Expectation
+noOutputsMultiAssetTest algorithm _ =
+    let
+        context =
+            { availableUtxos = []
+            , alreadySelectedUtxos = []
+            , targetAmount = token "policy" "name" 30
+            }
+
+        maxInputCount =
+            5
+    in
+    algorithm maxInputCount context
+        |> Expect.equal (Err <| UTxOBalanceInsufficient { selectedUtxos = [], missingValue = context.targetAmount })
+
+
+largestInsufficientFundsMultiAssetTest : a -> Expectation
+largestInsufficientFundsMultiAssetTest _ =
+    let
+        availableOutputs =
+            [ asset "1" "policy" "name" 5
+            , asset "2" "policy" "name" 10
+            ]
+
+        context =
+            { availableUtxos = availableOutputs
+            , alreadySelectedUtxos = []
+            , targetAmount = token "policy" "name" 30
+            }
+    in
+    largestFirst 5 context
+        |> Expect.equal
+            (Err <|
+                UTxOBalanceInsufficient
+                    { selectedUtxos = availableOutputs
+                    , missingValue = token "policy" "name" 15
+                    }
+            )
+
+
+orderedInsufficientFundsMultiAssetTest : a -> Expectation
+orderedInsufficientFundsMultiAssetTest _ =
+    let
+        availableOutputs =
+            [ asset "1" "policy" "name" 5
+            , asset "2" "policy" "name" 10
+            ]
+
+        context =
+            { availableUtxos = availableOutputs
+            , alreadySelectedUtxos = []
+            , targetAmount = token "policy" "name" 30
+            }
+    in
+    inOrderedList 5 context
+        |> Expect.equal
+            (Err <|
+                UTxOBalanceInsufficient
+                    { selectedUtxos = List.reverse availableOutputs
+                    , missingValue = token "policy" "name" 15
+                    }
+            )
+
+
+singleUtxoSingleOutputEqualValueMultiAssetTest : CoinSelection.Algorithm -> a -> Expectation
+singleUtxoSingleOutputEqualValueMultiAssetTest algorithm _ =
+    let
+        context =
+            { availableUtxos = [ asset "1" "policy" "name" 10 ]
+            , alreadySelectedUtxos = []
+            , targetAmount = token "policy" "name" 10
+            }
+
+        maxInputCount =
+            5
+
+        expectedResult =
+            Ok
+                { selectedUtxos = context.availableUtxos
+                , change = Nothing
+                }
+    in
+    algorithm maxInputCount context
+        |> Expect.equal expectedResult
+
+
+targetZeroAlreadySelectedOutputMultiAssetTest : CoinSelection.Algorithm -> a -> Expectation
+targetZeroAlreadySelectedOutputMultiAssetTest algorithm _ =
+    let
+        context =
+            { availableUtxos = []
+            , alreadySelectedUtxos = [ asset "1" "policy" "name" 1 ]
+            , targetAmount = Value.zero
+            }
+
+        maxInputCount =
+            5
+
+        expectedResult =
+            Ok
+                { selectedUtxos = [ asset "1" "policy" "name" 1 ]
+                , change = Just <| token "policy" "name" 1
+                }
+    in
+    algorithm maxInputCount context
+        |> Expect.equal expectedResult
+
+
+
+-- Helper functions
+
+
+asset : String -> String -> String -> Int -> ( OutputReference, Output )
+asset addrSuffix policyId name amount =
+    ( OutputReference (Bytes.fromHexUnchecked <| "Tx" ++ addrSuffix) 0
+    , { address = address addrSuffix
+      , amount = token policyId name amount
+      , datumOption = Nothing
+      , referenceScript = Nothing
+      }
+    )
+
+
+token : String -> String -> Int -> Value
+token policyId name amount =
+    Value.onlyToken (Bytes.fromHexUnchecked policyId) (Bytes.fromHexUnchecked name) (N.fromSafeInt amount)

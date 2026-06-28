@@ -1,60 +1,68 @@
 module Cardano.Transaction exposing
-    ( Transaction
-    , TransactionBody, AuxiliaryDataHash, ScriptDataHash
-    , WitnessSet
-    , Update, ProtocolParamUpdate, ProtocolVersion
+    ( Transaction, new
+    , TransactionBody, newBody, ScriptDataHash
+    , WitnessSet, newWitnessSet
+    , Update
     , ScriptContext, ScriptPurpose(..)
-    , Certificate(..), PoolId, GenesisHash, GenesisDelegateHash, VrfKeyHash, RewardSource(..), RewardTarget(..), MoveInstantaneousReward
-    , Relay(..), IpV4, IpV6, PoolParams, PoolMetadata, PoolMetadataHash
-    , CostModels, ExUnitPrices
-    , RationalNumber, UnitInterval, PositiveInterval
-    , VKeyWitness, BootstrapWitness, Ed25519PublicKey, Ed25519Signature, BootstrapWitnessChainCode, BootstrapWitnessAttributes
-    , deserialize, serialize
+    , Certificate(..), GenesisHash, GenesisDelegateHash, RewardSource(..), RewardTarget(..), MoveInstantaneousReward
+    , VKeyWitness, hashVKey, BootstrapWitness, Ed25519PublicKey, Ed25519Signature, BootstrapWitnessChainCode, BootstrapWitnessAttributes
+    , FeeParameters, RefScriptFeeParameters, defaultTxFeeParams, computeFees, computeRefScriptFee, computeScriptExecFee, computeTxSizeFee, estimateRefScriptFeeSavings, computeTotalExecUnits
+    , allInputs
+    , computeTxId, locateScriptWithHash
+    , updateSignatures, hashScriptData
+    , deserialize, serialize, encodeToCbor
+    , decodeWitnessSet, decodeVKeyWitness, encodeVKeyWitness
     )
 
 {-| Types and functions related to on-chain transactions.
 
-@docs Transaction
+@docs Transaction, new
 
-@docs TransactionBody, AuxiliaryDataHash, ScriptDataHash
+@docs TransactionBody, newBody, ScriptDataHash
 
-@docs WitnessSet
+@docs WitnessSet, newWitnessSet
 
-@docs AuxiliaryData, Metadata, Metadatum, MetadatumBytes
-
-@docs Update, ProtocolParamUpdate, ProtocolVersion
+@docs Update
 
 @docs ScriptContext, ScriptPurpose
 
-@docs Certificate, PoolId, GenesisHash, GenesisDelegateHash, VrfKeyHash, RewardSource, RewardTarget, MoveInstantaneousReward
+@docs Certificate, GenesisHash, GenesisDelegateHash, RewardSource, RewardTarget, MoveInstantaneousReward
 
-@docs Relay, IpV4, IpV6, PoolParams, PoolMetadata, PoolMetadataHash
+@docs VKeyWitness, hashVKey, BootstrapWitness, Ed25519PublicKey, Ed25519Signature, BootstrapWitnessChainCode, BootstrapWitnessAttributes
 
-@docs CostModels, ExUnitPrices
+@docs FeeParameters, RefScriptFeeParameters, defaultTxFeeParams, computeFees, computeRefScriptFee, computeScriptExecFee, computeTxSizeFee, estimateRefScriptFeeSavings, computeTotalExecUnits
 
-@docs RationalNumber, UnitInterval, PositiveInterval
+@docs allInputs
 
-@docs VKeyWitness, BootstrapWitness, Ed25519PublicKey, Ed25519Signature, BootstrapWitnessChainCode, BootstrapWitnessAttributes
+@docs computeTxId, locateScriptWithHash
 
-@docs deserialize, serialize
+@docs updateSignatures, hashScriptData
+
+@docs deserialize, serialize, encodeToCbor
+
+@docs decodeWitnessSet, decodeVKeyWitness, encodeVKeyWitness
 
 -}
 
-import Bytes.Comparable as Bytes exposing (Any, Bytes)
+import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
-import Cardano.Address as Address exposing (Credential, CredentialHash, NetworkId, StakeAddress)
+import Cardano.Address as Address exposing (Credential, CredentialHash, NetworkId(..), StakeAddress, decodeCredential)
+import Cardano.AuxiliaryData as AuxiliaryData exposing (AuxiliaryData)
 import Cardano.Data as Data exposing (Data)
+import Cardano.Gov as Gov exposing (ActionId, Anchor, CostModels, Drep, ProposalProcedure, ProtocolParamUpdate, Voter, VotingProcedure)
 import Cardano.MultiAsset as MultiAsset exposing (MultiAsset, PolicyId)
-import Cardano.Redeemer as Redeemer exposing (ExUnits, Redeemer)
-import Cardano.Script as Script exposing (NativeScript, ScriptCbor)
-import Cardano.Transaction.AuxiliaryData as AuxiliaryData exposing (AuxiliaryData)
-import Cardano.Utxo as Utxo exposing (Output, OutputReference, encodeOutput, encodeOutputReference)
+import Cardano.Pool as Pool exposing (VrfKeyHash)
+import Cardano.Redeemer as Redeemer exposing (ExUnitPrices, Redeemer)
+import Cardano.Script as Script exposing (NativeScript, Script, ScriptCbor)
+import Cardano.Utils exposing (RationalNumber)
+import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId, encodeOutput, encodeOutputReference)
 import Cbor.Decode as D
 import Cbor.Decode.Extra as D
 import Cbor.Encode as E
-import Cbor.Encode.Extra as E
-import Cbor.Tag as Tag
+import Cbor.Encode.Extra as EE
+import Integer exposing (Integer)
 import Natural exposing (Natural)
+import RationalNat exposing (RationalNat)
 
 
 {-| A Cardano transaction.
@@ -67,22 +75,30 @@ type alias Transaction =
     }
 
 
+{-| Helper for empty [Transaction] initialization.
+-}
+new : Transaction
+new =
+    { body = newBody
+    , witnessSet = newWitnessSet
+    , isValid = True
+    , auxiliaryData = Nothing
+    }
+
+
 {-| A Cardano transaction body.
 -}
 type alias TransactionBody =
     { inputs : List OutputReference -- 0
     , outputs : List Output -- 1
-    , fee : Maybe Natural -- 2
-    , ttl : Maybe Natural -- 3
+    , fee : Natural -- 2
+    , ttl : Maybe Natural -- 3 a slot number
     , certificates : List Certificate -- 4
     , withdrawals : List ( StakeAddress, Natural ) -- 5
     , update : Maybe Update -- 6
-    , auxiliaryDataHash : Maybe (Bytes AuxiliaryDataHash) -- 7
+    , auxiliaryDataHash : Maybe (Bytes AuxiliaryData.Hash) -- 7
     , validityIntervalStart : Maybe Int -- 8
-
-    -- TODO: Use a type that can have negative numbers instead
-    -- and make MultiAsset only positive numbers?
-    , mint : MultiAsset -- 9
+    , mint : MultiAsset Integer -- 9
     , scriptDataHash : Maybe (Bytes ScriptDataHash) -- 11
     , collateral : List OutputReference -- 13
     , requiredSigners : List (Bytes CredentialHash) -- 14
@@ -90,14 +106,13 @@ type alias TransactionBody =
     , collateralReturn : Maybe Output -- 16
     , totalCollateral : Maybe Int -- 17
     , referenceInputs : List OutputReference -- 18
+
+    -- New in Conway
+    , votingProcedures : List ( Voter, List ( ActionId, VotingProcedure ) ) -- 19 Voting procedures
+    , proposalProcedures : List ProposalProcedure -- 20 Proposal procedures
+    , currentTreasuryValue : Maybe Natural -- 21 Current treasury value
+    , treasuryDonation : Maybe Natural -- 22 Donation
     }
-
-
-{-| Phantom type for auxiliary data hashes.
-This is a 32-bytes Blake2b-256 hash.
--}
-type AuxiliaryDataHash
-    = AuxiliaryDataHash Never
 
 
 {-| Phantom type for script data hashes.
@@ -105,6 +120,34 @@ This is a 32-bytes Blake2b-256 hash.
 -}
 type ScriptDataHash
     = ScriptDataHash Never
+
+
+{-| Helper for empty transaction body initialization.
+-}
+newBody : TransactionBody
+newBody =
+    { inputs = []
+    , outputs = []
+    , fee = Natural.zero
+    , ttl = Nothing
+    , certificates = []
+    , withdrawals = []
+    , update = Nothing
+    , auxiliaryDataHash = Nothing
+    , validityIntervalStart = Nothing
+    , mint = MultiAsset.empty
+    , scriptDataHash = Nothing
+    , collateral = []
+    , requiredSigners = []
+    , networkId = Nothing
+    , collateralReturn = Nothing
+    , totalCollateral = Nothing
+    , referenceInputs = []
+    , votingProcedures = []
+    , proposalProcedures = []
+    , currentTreasuryValue = Nothing
+    , treasuryDonation = Nothing
+    }
 
 
 {-| A Cardano transaction witness set.
@@ -122,6 +165,22 @@ type alias WitnessSet =
     , plutusData : Maybe (List Data) -- 4
     , redeemer : Maybe (List Redeemer) -- 5
     , plutusV2Script : Maybe (List (Bytes ScriptCbor)) -- 6
+    , plutusV3Script : Maybe (List (Bytes ScriptCbor)) -- 7
+    }
+
+
+{-| Helper for empty witness set initialization.
+-}
+newWitnessSet : WitnessSet
+newWitnessSet =
+    { vkeywitness = Nothing
+    , nativeScripts = Nothing
+    , bootstrapWitness = Nothing
+    , plutusV1Script = Nothing
+    , plutusData = Nothing
+    , redeemer = Nothing
+    , plutusV2Script = Nothing
+    , plutusV3Script = Nothing
     }
 
 
@@ -133,85 +192,23 @@ type alias Update =
     }
 
 
-{-| Adjustable parameters that power key aspects of the network.
+{-| VKey witness
 -}
-type alias ProtocolParamUpdate =
-    { minFeeA : Maybe Natural -- 0
-    , minFeeB : Maybe Natural -- 1
-    , maxBlockBodySize : Maybe Int -- 2
-    , maxTransactionSize : Maybe Int -- 3
-    , maxBlockHeaderSize : Maybe Int -- 4
-    , keyDeposit : Maybe Natural -- 5
-    , poolDeposit : Maybe Natural -- 6
-    , maximumEpoch : Maybe Natural -- 7
-    , desiredNumberOfStakePools : Maybe Int -- 8
-    , poolPledgeInfluence : Maybe RationalNumber -- 9
-    , expansionRate : Maybe UnitInterval -- 10
-    , treasuryGrowthRate : Maybe UnitInterval -- 11
-    , decentralizationConstant : Maybe UnitInterval -- 12 (deprecated)
-    , extraEntropy : Maybe ( Int, Bytes Any ) -- 13 (deprecated)
-    , protocolVersion : Maybe ProtocolVersion -- 14
-    , minUtxoValue : Maybe Natural -- 15 (deprecated)
-    , minPoolCost : Maybe Int -- 16
-    , adaPerUtxoByte : Maybe Int -- 17
-    , costModelsForScriptLanguages : Maybe CostModels -- 18
-    , executionCosts : Maybe ExUnitPrices -- 19
-    , maxTxExUnits : Maybe ExUnits -- 20
-    , maxBlockExUnits : Maybe ExUnits -- 21
-    , maxValueSize : Maybe Int -- 22
-    , collateralPercentage : Maybe Int -- 23
-    , maxCollateralInputs : Maybe Int -- 24
-    }
-
-
-{-| -}
-type alias CostModels =
-    { plutusV1 : Maybe (List Int) -- 0
-    , plutusV2 : Maybe (List Int) -- 1
-    }
-
-
-{-| -}
-type alias ExUnitPrices =
-    { memPrice : PositiveInterval -- 0
-    , stepPrice : PositiveInterval -- 1
-    }
-
-
-{-| -}
-type alias ProtocolVersion =
-    ( Int, Int )
-
-
-{-| -}
-type alias UnitInterval =
-    RationalNumber
-
-
-{-| -}
-type alias PositiveInterval =
-    RationalNumber
-
-
-
--- https://github.com/txpipe/pallas/blob/d1ac0561427a1d6d1da05f7b4ea21414f139201e/pallas-primitives/src/alonzo/model.rs#L379
-
-
-{-| -}
-type alias RationalNumber =
-    { numerator : Int
-    , denominator : Int
-    }
-
-
-{-| -}
 type alias VKeyWitness =
     { vkey : Bytes Ed25519PublicKey -- 0
     , signature : Bytes Ed25519Signature -- 1
     }
 
 
-{-| -}
+{-| Compute the 28-bytes Blake2b hash of a public key.
+-}
+hashVKey : Bytes Ed25519PublicKey -> Bytes CredentialHash
+hashVKey =
+    Bytes.blake2b224
+
+
+{-| Bootstrap witness
+-}
 type alias BootstrapWitness =
     { publicKey : Bytes Ed25519PublicKey -- 0
     , signature : Bytes Ed25519Signature -- 1
@@ -281,24 +278,31 @@ Publishing certificates triggers different kind of rules.
 Most of the time, they require signatures from specific keys.
 -}
 type Certificate
-    = StakeRegistration { delegator : Credential }
-    | StakeDeregistration { delegator : Credential }
-    | StakeDelegation { delegator : Credential, poolId : Bytes PoolId }
-    | PoolRegistration PoolParams
-    | PoolRetirement { poolId : Bytes PoolId, epoch : Natural }
-    | GenesisKeyDelegation
+    = StakeRegistrationCert { delegator : Credential } -- 0 (will be deprecated after Conway)
+    | StakeDeregistrationCert { delegator : Credential } -- 1 (will be deprecated after Conway)
+    | StakeDelegationCert { delegator : Credential, poolId : Bytes Pool.Id } -- 2
+    | PoolRegistrationCert Pool.Params -- 3
+    | PoolRetirementCert { poolId : Bytes Pool.Id, epoch : Natural } -- 4
+    | GenesisKeyDelegationCert
+        -- 5 (deprecated in Conway)
         { genesisHash : Bytes GenesisHash
         , genesisDelegateHash : Bytes GenesisDelegateHash
         , vrfKeyHash : Bytes VrfKeyHash
         }
-    | MoveInstantaneousRewardsCert MoveInstantaneousReward
-
-
-{-| Phantom type for pool ID.
-This is a 28-bytes Blake2b-224 hash.
--}
-type PoolId
-    = PoolId Never
+    | MoveInstantaneousRewardsCert MoveInstantaneousReward -- 6 (deprecated in Conway)
+      -- New Conway era certificates: https://sancho.network/tools-resources/faq/
+    | RegCert { delegator : Credential, deposit : Natural } -- 7 Registers stake credentials
+    | UnregCert { delegator : Credential, refund : Natural } -- 8 Unregisters stake credentials
+    | VoteDelegCert { delegator : Credential, drep : Drep } -- 9 Delegates votes
+    | StakeVoteDelegCert { delegator : Credential, poolId : Bytes Pool.Id, drep : Drep } -- 10 Delegates to a stake pool and a DRep from the same certificate
+    | StakeRegDelegCert { delegator : Credential, poolId : Bytes Pool.Id, deposit : Natural } -- 11 Registers stake credentials and delegates to a stake pool
+    | VoteRegDelegCert { delegator : Credential, drep : Drep, deposit : Natural } -- 12 Registers stake credentials and delegates to a DRep
+    | StakeVoteRegDelegCert { delegator : Credential, poolId : Bytes Pool.Id, drep : Drep, deposit : Natural } -- 13 Registers stake credentials, delegates to a pool, and to a DRep
+    | AuthCommitteeHotCert { committeeColdCredential : Credential, committeeHotCredential : Credential } -- 14 Authorizes the constitutional committee hot credential
+    | ResignCommitteeColdCert { committeeColdCredential : Credential, anchor : Maybe Anchor } -- 15 Resigns the constitutional committee cold credential
+    | RegDrepCert { drepCredential : Credential, deposit : Natural, anchor : Maybe Anchor } -- 16 Registers DRep's credentials
+    | UnregDrepCert { drepCredential : Credential, refund : Natural } -- 17 Unregisters (retires) DRep's credentials
+    | UpdateDrepCert { drepCredential : Credential, anchor : Maybe Anchor } -- 18 Updates DRep's metadata anchor
 
 
 {-| Phantom type for Genesis hash.
@@ -313,63 +317,6 @@ This is a 28-bytes Blake2b-224 hash.
 -}
 type GenesisDelegateHash
     = GenesisDelegateHash Never
-
-
-{-| Phantom type for VRF key hash.
-This is a 32-bytes Blake2b-256 hash.
--}
-type VrfKeyHash
-    = VrfKeyHash Never
-
-
-{-| Parameters for stake pool registration.
--}
-type alias PoolParams =
-    { operator : Bytes PoolId
-    , vrfKeyHash : Bytes VrfKeyHash
-    , pledge : Natural
-    , cost : Natural
-    , margin : UnitInterval
-    , rewardAccount : StakeAddress
-    , poolOwners : List (Bytes CredentialHash)
-    , relays : List Relay
-    , poolMetadata : Maybe PoolMetadata
-    }
-
-
-{-| A pool's relay information.
--}
-type Relay
-    = SingleHostAddr { port_ : Maybe Int, ipv4 : Maybe (Bytes IpV4), ipv6 : Maybe (Bytes IpV6) }
-    | SingleHostName { port_ : Maybe Int, dnsName : String }
-    | MultiHostName { dnsName : String }
-
-
-{-| Phantom type for 4-bytes IPV4 addresses.
--}
-type IpV4
-    = IpV4 Never
-
-
-{-| Phantom type for 16-bytes IPV6 addresses.
--}
-type IpV6
-    = IpV6 Never
-
-
-{-| A pool's metadata hash.
--}
-type alias PoolMetadata =
-    { url : String -- tstr .size (0..64)
-    , poolMetadataHash : Bytes PoolMetadataHash
-    }
-
-
-{-| Phantom type for 32-bytes pool metadata hash.
-This is a Blacke2b-256 hash.
--}
-type PoolMetadataHash
-    = PoolMetadataHash Never
 
 
 {-| Payload for [MoveInstantaneousRewardsCert].
@@ -398,6 +345,299 @@ type RewardTarget
     | OtherAccountingPot Natural
 
 
+{-| Parameters required to compute transaction fees.
+-}
+type alias FeeParameters =
+    { baseFee : Int
+    , feePerByte : Int
+    , scriptExUnitPrice : ExUnitPrices
+    , refScriptFeeParams : RefScriptFeeParameters
+    }
+
+
+{-| Default values for fee parameters.
+-}
+defaultTxFeeParams : FeeParameters
+defaultTxFeeParams =
+    { baseFee = 155381
+    , feePerByte = 44
+    , scriptExUnitPrice =
+        { memPrice = { numerator = 577, denominator = 10000 }
+        , stepPrice = { numerator = 721, denominator = 10000000 }
+        }
+    , refScriptFeeParams =
+        { minFeeRefScriptCostPerByte = 15
+        , multiplier = { numerator = 12, denominator = 10 }
+        , sizeIncrement = 25600
+        }
+    }
+
+
+{-| Parameters for the costs of referencing scripts.
+
+Full explanation of the formula here:
+<https://github.com/IntersectMBO/cardano-ledger/blob/master/docs/adr/2024-08-14_009-refscripts-fee-change.md>
+
+-}
+type alias RefScriptFeeParameters =
+    { minFeeRefScriptCostPerByte : Int -- lovelace/bytes until reaching the second size level
+    , multiplier : RationalNumber -- exponential cost increase for each size level
+    , sizeIncrement : Int -- level size (in bytes) for each exponential fee price change
+    }
+
+
+{-| Re-compute fees for a transaction (does not read `body.fee`).
+-}
+computeFees : FeeParameters -> { refScriptBytes : Int } -> Transaction -> { txSizeFee : Natural, scriptExecFee : Natural, refScriptSizeFee : Natural }
+computeFees ({ scriptExUnitPrice, refScriptFeeParams } as feeParams) { refScriptBytes } tx =
+    { txSizeFee = computeTxSizeFee feeParams tx
+    , scriptExecFee = computeScriptExecFee scriptExUnitPrice tx
+    , refScriptSizeFee = computeRefScriptFee refScriptFeeParams refScriptBytes
+    }
+
+
+{-| Compute the part of the fees of a Transaction directly related to the Tx size in bytes.
+
+The "baseFee" and "feePerByte" are network parameters.
+
+-}
+computeTxSizeFee : { a | baseFee : Int, feePerByte : Int } -> Transaction -> Natural
+computeTxSizeFee { baseFee, feePerByte } tx =
+    Natural.fromSafeInt (baseFee + feePerByte * (Bytes.width <| serialize tx))
+
+
+{-| Compute the part of the fees of a Transaction related to the execution of scripts in the Plutus VM.
+-}
+computeScriptExecFee : ExUnitPrices -> Transaction -> Natural
+computeScriptExecFee { stepPrice, memPrice } tx =
+    let
+        { totalSteps, totalMem } =
+            computeTotalExecUnits tx
+
+        totalStepsCost =
+            Natural.mul totalSteps (Natural.fromSafeInt stepPrice.numerator)
+                |> Natural.divBy (Natural.fromSafeInt stepPrice.denominator)
+                |> Maybe.withDefault Natural.zero
+
+        totalMemCost =
+            Natural.mul totalMem (Natural.fromSafeInt memPrice.numerator)
+                |> Natural.divBy (Natural.fromSafeInt memPrice.denominator)
+                |> Maybe.withDefault Natural.zero
+    in
+    Natural.add totalStepsCost totalMemCost
+
+
+{-| Compute the total execution units of a Transaction.
+-}
+computeTotalExecUnits : Transaction -> { totalMem : Natural, totalSteps : Natural }
+computeTotalExecUnits { witnessSet } =
+    witnessSet.redeemer
+        |> Maybe.withDefault []
+        |> List.foldl
+            (\r { totalSteps, totalMem } ->
+                { totalSteps = Natural.add totalSteps <| Natural.fromSafeInt r.exUnits.steps
+                , totalMem = Natural.add totalMem <| Natural.fromSafeInt r.exUnits.mem
+                }
+            )
+            { totalMem = Natural.zero, totalSteps = Natural.zero }
+
+
+{-| Helper function to compute the fees associated with reference script size.
+
+Full explanation of the formula here:
+<https://github.com/IntersectMBO/cardano-ledger/blob/master/docs/adr/2024-08-14_009-refscripts-fee-change.md>
+
+```haskell
+tierRefScriptFee = go 0 minFeeRefScriptCostPerByte
+  where
+    go acc curTierPrice n
+      | n < sizeIncrement =
+          floor (acc + (n % 1) * curTierPrice)
+      | otherwise =
+          let acc' = acc + curTierPrice * (sizeIncrement % 1)
+           in go acc' (multiplier * curTierPrice) (n - sizeIncrement)
+    sizeIncrement = 25600
+    multiplier = 1.2
+    minFeeRefScriptCostPerByte = 15
+```
+
+-}
+computeRefScriptFee : RefScriptFeeParameters -> Int -> Natural
+computeRefScriptFee ({ minFeeRefScriptCostPerByte } as p) refScriptBytes =
+    let
+        baseTierPricePerByte =
+            RationalNat.fromSafeInt minFeeRefScriptCostPerByte
+    in
+    refScriptFeeHelper p { bytesLeft = refScriptBytes, tierPricePerByte = baseTierPricePerByte } RationalNat.zero
+        |> RationalNat.floor
+        |> Maybe.withDefault Natural.zero
+
+
+refScriptFeeHelper : RefScriptFeeParameters -> { bytesLeft : Int, tierPricePerByte : RationalNat } -> RationalNat -> RationalNat
+refScriptFeeHelper p { bytesLeft, tierPricePerByte } costAccum =
+    if bytesLeft <= p.sizeIncrement then
+        RationalNat.mul tierPricePerByte (RationalNat.fromSafeInt bytesLeft)
+            |> RationalNat.add costAccum
+
+    else
+        let
+            newCostAccum =
+                RationalNat.mul tierPricePerByte (RationalNat.fromSafeInt p.sizeIncrement)
+                    |> RationalNat.add costAccum
+
+            multip =
+                RationalNat (Natural.fromSafeInt p.multiplier.numerator) (Natural.fromSafeInt p.multiplier.denominator)
+        in
+        refScriptFeeHelper p
+            { bytesLeft = bytesLeft - p.sizeIncrement
+            , tierPricePerByte = RationalNat.mul multip tierPricePerByte
+            }
+            newCostAccum
+
+
+{-| Estimate the potential saving in transaction fees by passing a script by reference
+instead of putting inline in the Tx witnesses.
+-}
+estimateRefScriptFeeSavings : Script -> Int
+estimateRefScriptFeeSavings script =
+    let
+        refScriptOutputRef =
+            { transactionId = Bytes.dummy 32 "", outputIndex = 0 }
+
+        refScript =
+            Script.refFromScript script
+
+        txWithRefScript =
+            { new | body = { newBody | referenceInputs = [ refScriptOutputRef ] } }
+
+        txWithInlineScript =
+            case script of
+                Script.Native nativeScript ->
+                    { new | witnessSet = { newWitnessSet | nativeScripts = Just [ nativeScript ] } }
+
+                Script.Plutus plutusScript ->
+                    { new | witnessSet = { newWitnessSet | plutusV3Script = Just [ Script.cborWrappedBytes plutusScript ] } }
+
+        feesWithoutExecution tx =
+            Natural.add
+                (computeTxSizeFee defaultTxFeeParams tx)
+                (computeRefScriptFee defaultTxFeeParams.refScriptFeeParams <| Bytes.width (Script.refBytes refScript))
+    in
+    (Natural.toInt <| feesWithoutExecution txWithInlineScript)
+        - (Natural.toInt <| feesWithoutExecution txWithRefScript)
+
+
+{-| Extract all inputs that are used in the transaction,
+from inputs, collateral and reference inputs.
+-}
+allInputs : Transaction -> Utxo.RefDict ()
+allInputs tx =
+    List.concat
+        [ tx.body.inputs
+        , tx.body.collateral
+        , tx.body.referenceInputs
+        ]
+        |> List.map (\ref -> ( ref, () ))
+        |> Utxo.refDictFromList
+
+
+{-| Serialize the body and compute the Tx ID.
+-}
+computeTxId : Transaction -> Bytes TransactionId
+computeTxId tx =
+    E.encode (encodeTransactionBody tx.body)
+        |> Bytes.fromBytes
+        |> Bytes.blake2b256
+
+
+{-| Helper function to locate the index of a script within a list of Outputs.
+-}
+locateScriptWithHash : Bytes CredentialHash -> List Output -> Maybe ( Int, Script.Reference )
+locateScriptWithHash scriptHash outputs =
+    let
+        findScriptInOutput : Int -> Output -> Maybe ( Int, Script.Reference )
+        findScriptInOutput index output =
+            case output.referenceScript of
+                Just scriptRef ->
+                    if Script.refHash scriptRef == scriptHash then
+                        Just ( index, scriptRef )
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    Nothing
+    in
+    List.indexedMap findScriptInOutput outputs
+        |> List.filterMap identity
+        |> List.head
+
+
+{-| Clear all signatures from the witness set of the Tx.
+-}
+updateSignatures : (Maybe (List VKeyWitness) -> Maybe (List VKeyWitness)) -> Transaction -> Transaction
+updateSignatures f ({ witnessSet } as tx) =
+    { tx | witnessSet = { witnessSet | vkeywitness = f witnessSet.vkeywitness } }
+
+
+{-| Compute the script data hash of the transaction.
+
+The caller must know what versions of Plutus scripts are present in the Tx
+and provide accordingly the associated cost models.
+
+Script data is serialized in a very specific way to compute the hash.
+See Conway CDDL format: <https://github.com/IntersectMBO/cardano-ledger/blob/676ffc5c3e0dddb2b1ddeb76627541b195fefb5a/eras/conway/impl/cddl-files/conway.cddl#L197>
+
+-}
+hashScriptData : CostModels -> Transaction -> Bytes ScriptDataHash
+hashScriptData costModels tx =
+    let
+        datumsHex =
+            tx.witnessSet.plutusData
+                |> Maybe.map
+                    (E.list Data.toCborUplc
+                        >> E.encode
+                        >> Bytes.fromBytes
+                        >> Bytes.toHex
+                    )
+                |> Maybe.withDefault ""
+    in
+    case tx.witnessSet.redeemer of
+        Nothing ->
+            Bytes.fromHexUnchecked ("80" ++ datumsHex ++ "a0")
+                |> Bytes.blake2b256
+
+        Just redeemers ->
+            let
+                redeemersHex =
+                    E.encode (encodeRedeemersAsMap redeemers)
+                        |> Bytes.fromBytes
+                        |> Bytes.toHex
+
+                languageViews =
+                    { v1 = Maybe.map (EE.indefiniteList E.int) costModels.plutusV1
+                    , v2 = Maybe.map (E.list E.int) costModels.plutusV2
+                    , v3 = Maybe.map (E.list E.int) costModels.plutusV3
+                    }
+
+                languageViewsEncoder =
+                    -- Plutus V1 language model is last because it is doubly encoded,
+                    -- and in canonical encoding, 4100 is after 01 and 02
+                    E.record identity <|
+                        E.fields
+                            >> E.optionalField (E.int 1) identity .v2
+                            >> E.optionalField (E.int 2) identity .v3
+                            >> E.optionalField (E.bytes <| Bytes.toBytes <| Bytes.fromHexUnchecked "00") identity .v1
+
+                languageViewsHex =
+                    E.encode (languageViewsEncoder languageViews)
+                        |> Bytes.fromBytes
+                        |> Bytes.toHex
+            in
+            Bytes.fromHexUnchecked (redeemersHex ++ datumsHex ++ languageViewsHex)
+                |> Bytes.blake2b256
+
+
 
 -- https://github.com/input-output-hk/cardano-ledger/blob/a792fbff8156773e712ef875d82c2c6d4358a417/eras/babbage/test-suite/cddl-files/babbage.cddl#L13
 
@@ -406,7 +646,7 @@ type RewardTarget
 -}
 serialize : Transaction -> Bytes Transaction
 serialize =
-    encodeTransaction >> E.encode >> Bytes.fromBytes
+    encodeToCbor >> E.encode >> Bytes.fromBytes
 
 
 {-| Deserialize a transaction's cbor bytes into a [Transaction]
@@ -418,9 +658,10 @@ deserialize bytes =
         |> D.decode (D.oneOf [ decodeTransaction, D.failWith "Transaction decoder failed" ])
 
 
-{-| -}
-encodeTransaction : Transaction -> E.Encoder
-encodeTransaction =
+{-| Encode a Tx to CBOR
+-}
+encodeToCbor : Transaction -> E.Encoder
+encodeToCbor =
     E.tuple <|
         E.elems
             >> E.elem encodeTransactionBody .body
@@ -436,21 +677,43 @@ encodeTransactionBody =
         E.fields
             >> E.field 0 encodeInputs .inputs
             >> E.field 1 encodeOutputs .outputs
-            >> E.optionalField 2 E.natural .fee
-            >> E.optionalField 3 E.natural .ttl
-            >> E.nonEmptyField 4 List.isEmpty encodeCertificates .certificates
-            >> E.nonEmptyField 5 List.isEmpty (E.ledgerAssociativeList Address.stakeAddressToCbor E.natural) .withdrawals
+            >> E.field 2 EE.natural .fee
+            >> E.optionalField 3 EE.natural .ttl
+            >> EE.nonEmptyField 4 List.isEmpty encodeCertificates .certificates
+            >> EE.nonEmptyField 5 List.isEmpty (EE.associativeList Address.stakeAddressToCbor EE.natural) .withdrawals
             >> E.optionalField 6 encodeUpdate .update
             >> E.optionalField 7 Bytes.toCbor .auxiliaryDataHash
             >> E.optionalField 8 E.int .validityIntervalStart
-            >> E.nonEmptyField 9 MultiAsset.isEmpty MultiAsset.toCbor .mint
+            >> EE.nonEmptyField 9 MultiAsset.isEmpty MultiAsset.mintToCbor .mint
             >> E.optionalField 11 Bytes.toCbor .scriptDataHash
-            >> E.nonEmptyField 13 List.isEmpty encodeInputs .collateral
-            >> E.nonEmptyField 14 List.isEmpty encodeRequiredSigners .requiredSigners
+            >> EE.nonEmptyField 13 List.isEmpty encodeInputs .collateral
+            >> EE.nonEmptyField 14 List.isEmpty encodeRequiredSigners .requiredSigners
             >> E.optionalField 15 Address.encodeNetworkId .networkId
             >> E.optionalField 16 encodeOutput .collateralReturn
             >> E.optionalField 17 E.int .totalCollateral
-            >> E.nonEmptyField 18 List.isEmpty encodeInputs .referenceInputs
+            >> EE.nonEmptyField 18 List.isEmpty encodeInputs .referenceInputs
+            >> EE.nonEmptyField 19 List.isEmpty encodeVotingProcedures .votingProcedures
+            >> EE.nonEmptyField 20 List.isEmpty (E.list encodeProposalProcedure) .proposalProcedures
+            >> E.optionalField 21 EE.natural .currentTreasuryValue
+            >> E.optionalField 22 EE.natural .treasuryDonation
+
+
+encodeVotingProcedures : List ( Voter, List ( ActionId, VotingProcedure ) ) -> E.Encoder
+encodeVotingProcedures =
+    EE.associativeList
+        Gov.encodeVoter
+        (EE.associativeList Gov.encodeActionId Gov.encodeVotingProcedure)
+
+
+encodeProposalProcedure : ProposalProcedure -> E.Encoder
+encodeProposalProcedure =
+    E.tuple
+        (E.elems
+            >> E.elem EE.natural .deposit
+            >> E.elem Address.stakeAddressToCbor .depositReturnAccount
+            >> E.elem Gov.encodeAction .govAction
+            >> E.elem Gov.encodeAnchor .anchor
+        )
 
 
 {-| -}
@@ -459,21 +722,24 @@ encodeWitnessSet =
     E.record E.int <|
         E.fields
             >> E.optionalField 0 encodeVKeyWitnesses .vkeywitness
-            >> E.optionalField 1 (E.ledgerList Script.encodeNativeScript) .nativeScripts
+            >> E.optionalField 1 (E.list Script.encodeNativeScript) .nativeScripts
             >> E.optionalField 2 encodeBootstrapWitnesses .bootstrapWitness
-            >> E.optionalField 3 (E.ledgerList Bytes.toCbor) .plutusV1Script
-            >> E.optionalField 4 (E.indefiniteList Data.toCbor) .plutusData
-            >> E.optionalField 5 (E.ledgerList Redeemer.encode) .redeemer
-            >> E.optionalField 6 (E.ledgerList Bytes.toCbor) .plutusV2Script
+            >> E.optionalField 3 (E.list Bytes.toCbor) .plutusV1Script
+            >> E.optionalField 4 (E.list Data.toCborUplc) .plutusData
+            >> E.optionalField 5 encodeRedeemersAsMap .redeemer
+            >> E.optionalField 6 (E.list Bytes.toCbor) .plutusV2Script
+            >> E.optionalField 7 (E.list Bytes.toCbor) .plutusV3Script
 
 
-{-| -}
+{-| Encode to CBOR the VKey signatures in the witness set.
+-}
 encodeVKeyWitnesses : List VKeyWitness -> E.Encoder
 encodeVKeyWitnesses v =
-    E.ledgerList encodeVKeyWitness v
+    E.list encodeVKeyWitness v
 
 
-{-| -}
+{-| Encode to CBOR one VKey signatures.
+-}
 encodeVKeyWitness : VKeyWitness -> E.Encoder
 encodeVKeyWitness =
     E.tuple <|
@@ -485,7 +751,7 @@ encodeVKeyWitness =
 {-| -}
 encodeBootstrapWitnesses : List BootstrapWitness -> E.Encoder
 encodeBootstrapWitnesses b =
-    E.ledgerList encodeBootstrapWitness b
+    E.list encodeBootstrapWitness b
 
 
 {-| -}
@@ -498,64 +764,71 @@ encodeBootstrapWitness =
 
 
 {-| -}
+encodeRedeemersAsMap : List Redeemer -> E.Encoder
+encodeRedeemersAsMap redeemers =
+    List.map (\r -> ( ( r.tag, r.index ), ( r.data, r.exUnits ) )) redeemers
+        |> EE.associativeList
+            (E.tuple <|
+                E.elems
+                    >> E.elem Redeemer.encodeTag Tuple.first
+                    >> E.elem E.int Tuple.second
+            )
+            (E.tuple <|
+                E.elems
+                    >> E.elem Data.toCborUplc Tuple.first
+                    >> E.elem Redeemer.encodeExUnits Tuple.second
+            )
+
+
+{-| -}
 encodeInputs : List OutputReference -> E.Encoder
 encodeInputs inputs =
-    E.ledgerList encodeOutputReference inputs
+    E.list encodeOutputReference inputs
 
 
 {-| -}
 encodeOutputs : List Output -> E.Encoder
 encodeOutputs outputs =
-    E.ledgerList encodeOutput outputs
+    E.list encodeOutput outputs
 
 
 {-| -}
 encodeCertificates : List Certificate -> E.Encoder
 encodeCertificates =
-    E.ledgerList encodeCertificate
+    E.list encodeCertificate
 
 
 {-| -}
 encodeCertificate : Certificate -> E.Encoder
 encodeCertificate certificate =
-    E.ledgerList identity <|
+    E.list identity <|
         case certificate of
-            StakeRegistration { delegator } ->
+            StakeRegistrationCert { delegator } ->
                 [ E.int 0
                 , Address.credentialToCbor delegator
                 ]
 
-            StakeDeregistration { delegator } ->
+            StakeDeregistrationCert { delegator } ->
                 [ E.int 1
                 , Address.credentialToCbor delegator
                 ]
 
-            StakeDelegation { delegator, poolId } ->
+            StakeDelegationCert { delegator, poolId } ->
                 [ E.int 2
                 , Address.credentialToCbor delegator
                 , Bytes.toCbor poolId
                 ]
 
-            PoolRegistration poolParams ->
-                [ E.int 3
-                , Bytes.toCbor poolParams.operator
-                , Bytes.toCbor poolParams.vrfKeyHash
-                , E.natural poolParams.pledge
-                , E.natural poolParams.cost
-                , encodeRationalNumber poolParams.margin
-                , Address.stakeAddressToCbor poolParams.rewardAccount
-                , E.ledgerList Bytes.toCbor poolParams.poolOwners
-                , E.ledgerList encodeRelay poolParams.relays
-                , E.maybe encodePoolMetadata poolParams.poolMetadata
-                ]
+            PoolRegistrationCert poolParams ->
+                E.int 3 :: Pool.encodeParams poolParams
 
-            PoolRetirement { poolId, epoch } ->
+            PoolRetirementCert { poolId, epoch } ->
                 [ E.int 4
                 , Bytes.toCbor poolId
-                , E.natural epoch
+                , EE.natural epoch
                 ]
 
-            GenesisKeyDelegation { genesisHash, genesisDelegateHash, vrfKeyHash } ->
+            GenesisKeyDelegationCert { genesisHash, genesisDelegateHash, vrfKeyHash } ->
                 [ E.int 5
                 , Bytes.toCbor genesisHash
                 , Bytes.toCbor genesisDelegateHash
@@ -567,36 +840,95 @@ encodeCertificate certificate =
                 , encodeMoveInstantaneousReward moveInstantaneousReward
                 ]
 
-
-encodeRelay : Relay -> E.Encoder
-encodeRelay relay =
-    E.ledgerList identity <|
-        case relay of
-            SingleHostAddr { port_, ipv4, ipv6 } ->
-                [ E.int 0
-                , E.maybe E.int port_
-                , E.maybe Bytes.toCbor ipv4
-                , E.maybe Bytes.toCbor ipv6
+            -- 7 Registers stake credentials
+            RegCert { delegator, deposit } ->
+                [ E.int 7
+                , Address.credentialToCbor delegator
+                , EE.natural deposit
                 ]
 
-            SingleHostName { port_, dnsName } ->
-                [ E.int 1
-                , E.maybe E.int port_
-                , E.string dnsName
+            -- 8 Unregisters stake credentials
+            UnregCert { delegator, refund } ->
+                [ E.int 8
+                , Address.credentialToCbor delegator
+                , EE.natural refund
                 ]
 
-            MultiHostName { dnsName } ->
-                [ E.int 2
-                , E.string dnsName
+            -- 9 Delegates votes
+            VoteDelegCert { delegator, drep } ->
+                [ E.int 9
+                , Address.credentialToCbor delegator
+                , Gov.encodeDrep drep
                 ]
 
+            -- 10 Delegates to a stake pool and a DRep from the same certificate
+            StakeVoteDelegCert { delegator, poolId, drep } ->
+                [ E.int 10
+                , Address.credentialToCbor delegator
+                , Bytes.toCbor poolId
+                , Gov.encodeDrep drep
+                ]
 
-encodePoolMetadata : PoolMetadata -> E.Encoder
-encodePoolMetadata =
-    E.tuple <|
-        E.elems
-            >> E.elem E.string .url
-            >> E.elem Bytes.toCbor .poolMetadataHash
+            -- 11 Registers stake credentials and delegates to a stake pool
+            StakeRegDelegCert { delegator, poolId, deposit } ->
+                [ E.int 11
+                , Address.credentialToCbor delegator
+                , Bytes.toCbor poolId
+                , EE.natural deposit
+                ]
+
+            -- 12 Registers stake credentials and delegates to a DRep
+            VoteRegDelegCert { delegator, drep, deposit } ->
+                [ E.int 12
+                , Address.credentialToCbor delegator
+                , Gov.encodeDrep drep
+                , EE.natural deposit
+                ]
+
+            -- 13 Registers stake credentials, delegates to a pool, and to a DRep
+            StakeVoteRegDelegCert { delegator, poolId, drep, deposit } ->
+                [ E.int 13
+                , Address.credentialToCbor delegator
+                , Bytes.toCbor poolId
+                , Gov.encodeDrep drep
+                , EE.natural deposit
+                ]
+
+            -- 14 Authorizes the constitutional committee hot credential
+            AuthCommitteeHotCert { committeeColdCredential, committeeHotCredential } ->
+                [ E.int 14
+                , Address.credentialToCbor committeeColdCredential
+                , Address.credentialToCbor committeeHotCredential
+                ]
+
+            -- 15 Resigns the constitutional committee cold credential
+            ResignCommitteeColdCert { committeeColdCredential, anchor } ->
+                [ E.int 15
+                , Address.credentialToCbor committeeColdCredential
+                , E.maybe Gov.encodeAnchor anchor
+                ]
+
+            -- 16 Registers DRep's credentials
+            RegDrepCert { drepCredential, deposit, anchor } ->
+                [ E.int 16
+                , Address.credentialToCbor drepCredential
+                , EE.natural deposit
+                , E.maybe Gov.encodeAnchor anchor
+                ]
+
+            -- 17 Unregisters (retires) DRep's credentials
+            UnregDrepCert { drepCredential, refund } ->
+                [ E.int 17
+                , Address.credentialToCbor drepCredential
+                , EE.natural refund
+                ]
+
+            -- 18 Updates DRep's metadata anchor
+            UpdateDrepCert { drepCredential, anchor } ->
+                [ E.int 18
+                , Address.credentialToCbor drepCredential
+                , E.maybe Gov.encodeAnchor anchor
+                ]
 
 
 encodeMoveInstantaneousReward : MoveInstantaneousReward -> E.Encoder
@@ -622,16 +954,16 @@ encodeRewardTarget : RewardTarget -> E.Encoder
 encodeRewardTarget target =
     case target of
         StakeCredentials distribution ->
-            E.ledgerAssociativeList Address.credentialToCbor E.natural distribution
+            EE.associativeList Address.credentialToCbor EE.natural distribution
 
         OtherAccountingPot n ->
-            E.natural n
+            EE.natural n
 
 
 {-| -}
 encodeRequiredSigners : List (Bytes CredentialHash) -> E.Encoder
 encodeRequiredSigners =
-    E.ledgerList Bytes.toCbor
+    E.list Bytes.toCbor
 
 
 {-| -}
@@ -640,76 +972,35 @@ encodeUpdate =
     E.tuple <|
         E.elems
             >> E.elem encodeProposedProtocolParameterUpdates .proposedProtocolParameterUpdates
-            >> E.elem E.natural .epoch
+            >> E.elem EE.natural .epoch
 
 
 {-| -}
 encodeProposedProtocolParameterUpdates : BytesMap GenesisHash ProtocolParamUpdate -> E.Encoder
 encodeProposedProtocolParameterUpdates =
-    Bytes.Map.toCbor encodeProtocolParamUpdate
-
-
-encodeProtocolParamUpdate : ProtocolParamUpdate -> E.Encoder
-encodeProtocolParamUpdate =
-    E.record E.int <|
-        E.fields
-            >> E.optionalField 0 E.natural .minFeeA
-            >> E.optionalField 1 E.natural .minFeeB
-            >> E.optionalField 2 E.int .maxBlockBodySize
-            >> E.optionalField 3 E.int .maxTransactionSize
-            >> E.optionalField 4 E.int .maxBlockHeaderSize
-            >> E.optionalField 5 E.natural .keyDeposit
-            >> E.optionalField 6 E.natural .poolDeposit
-            >> E.optionalField 7 E.natural .maximumEpoch
-            >> E.optionalField 8 E.int .desiredNumberOfStakePools
-            >> E.optionalField 9 encodeRationalNumber .poolPledgeInfluence
-            >> E.optionalField 10 encodeRationalNumber .expansionRate
-            >> E.optionalField 11 encodeRationalNumber .treasuryGrowthRate
-            >> E.optionalField 14 (\( v, m ) -> E.ledgerList E.int [ v, m ]) .protocolVersion
-            >> E.optionalField 16 E.int .minPoolCost
-            >> E.optionalField 17 E.int .adaPerUtxoByte
-            >> E.optionalField 18 encodeCostModels .costModelsForScriptLanguages
-            >> E.optionalField 19 encodeExUnitPrices .executionCosts
-            >> E.optionalField 20 Redeemer.encodeExUnits .maxTxExUnits
-            >> E.optionalField 21 Redeemer.encodeExUnits .maxBlockExUnits
-            >> E.optionalField 22 E.int .maxValueSize
-            >> E.optionalField 23 E.int .collateralPercentage
-            >> E.optionalField 24 E.int .maxCollateralInputs
-
-
-encodeExUnitPrices : ExUnitPrices -> E.Encoder
-encodeExUnitPrices =
-    E.tuple <|
-        E.elems
-            >> E.elem encodeRationalNumber .memPrice
-            >> E.elem encodeRationalNumber .stepPrice
-
-
-encodeCostModels : CostModels -> E.Encoder
-encodeCostModels =
-    E.record E.int <|
-        E.fields
-            >> E.optionalField 0 (E.ledgerList E.int) .plutusV1
-            >> E.optionalField 1 (E.ledgerList E.int) .plutusV2
-
-
-encodeRationalNumber : RationalNumber -> E.Encoder
-encodeRationalNumber =
-    E.tagged (Tag.Unknown 30) <|
-        E.tuple <|
-            E.elems
-                >> E.elem E.int .numerator
-                >> E.elem E.int .denominator
+    Bytes.Map.toCbor Gov.encodeProtocolParamUpdate
 
 
 {-| -}
 decodeTransaction : D.Decoder Transaction
 decodeTransaction =
-    D.tuple (\body witness auxiliary -> { body = body, witnessSet = witness, isValid = True, auxiliaryData = auxiliary }) <|
-        D.elems
-            >> D.elem (D.oneOf [ decodeBody, D.failWith "Failed to decode body" ])
-            >> D.elem (D.oneOf [ decodeWitness, D.failWith "Failed to decode witness" ])
-            >> D.elem (D.oneOf [ D.maybe AuxiliaryData.fromCbor, D.failWith "Failed to decode auxiliary" ])
+    let
+        preAlonzo =
+            D.tuple (\body witness auxiliary -> { body = body, witnessSet = witness, isValid = True, auxiliaryData = auxiliary }) <|
+                D.elems
+                    >> D.elem (D.oneOf [ decodeBody, D.failWith "Failed to decode body" ])
+                    >> D.elem (D.oneOf [ decodeWitnessSet, D.failWith "Failed to decode witness" ])
+                    >> D.elem (D.oneOf [ D.maybe AuxiliaryData.fromCbor, D.failWith "Failed to decode auxiliary" ])
+
+        postAlonzo =
+            D.tuple Transaction <|
+                D.elems
+                    >> D.elem (D.oneOf [ decodeBody, D.failWith "Failed to decode body" ])
+                    >> D.elem (D.oneOf [ decodeWitnessSet, D.failWith "Failed to decode witness" ])
+                    >> D.elem D.bool
+                    >> D.elem (D.oneOf [ D.maybe AuxiliaryData.fromCbor, D.failWith "Failed to decode auxiliary" ])
+    in
+    D.oneOf [ postAlonzo, preAlonzo ]
 
 
 
@@ -719,36 +1010,248 @@ decodeTransaction =
 decodeBody : D.Decoder TransactionBody
 decodeBody =
     let
-        bodyBuilder inputs outputs fee ttl certificates withdrawals update auxiliaryDataHash =
-            { newBody
-                | inputs = inputs
-                , outputs = outputs
-                , fee = Just fee
-                , ttl = Just ttl
-                , certificates = Maybe.withDefault [] certificates
-                , withdrawals = Maybe.withDefault [] withdrawals
-                , update = update
-                , auxiliaryDataHash = auxiliaryDataHash
+        buildTxBody inputs outputs fee ttl certificates withdrawals update auxiliaryDataHash validityIntervalStart mint scriptDataHash collateral requiredSigners networkId collateralReturn totalCollateral referenceInputs votingProcedures proposalProcedures currentTreasuryValue treasuryDonation =
+            { inputs = inputs
+            , outputs = outputs
+            , fee = fee
+            , ttl = ttl
+            , certificates = certificates |> Maybe.withDefault []
+            , withdrawals = withdrawals |> Maybe.withDefault []
+            , update = update
+            , auxiliaryDataHash = auxiliaryDataHash
+            , validityIntervalStart = validityIntervalStart
+            , mint = mint |> Maybe.withDefault MultiAsset.empty
+            , scriptDataHash = scriptDataHash
+            , collateral = collateral |> Maybe.withDefault []
+            , requiredSigners = requiredSigners |> Maybe.withDefault []
+            , networkId = networkId
+            , collateralReturn = collateralReturn
+            , totalCollateral = totalCollateral
+            , referenceInputs = referenceInputs |> Maybe.withDefault []
+            , votingProcedures = votingProcedures |> Maybe.withDefault []
+            , proposalProcedures = proposalProcedures |> Maybe.withDefault []
+            , currentTreasuryValue = currentTreasuryValue
+            , treasuryDonation = treasuryDonation
             }
     in
-    D.record D.int bodyBuilder <|
+    D.record D.int buildTxBody <|
         D.fields
             -- inputs
-            >> D.field 0 (D.oneOf [ D.list Utxo.decodeOutputReference, D.failWith "Failed to decode inputs" ])
+            >> D.field 0
+                (D.oneOf
+                    [ D.set Utxo.decodeOutputReference
+                    , D.failWith "Failed to decode inputs (0)"
+                    ]
+                )
             -- outputs
-            >> D.field 1 (D.oneOf [ D.list Utxo.decodeOutput, D.failWith "Failed to decode outputs" ])
+            >> D.field 1
+                (D.oneOf
+                    [ D.list Utxo.decodeOutput
+                    , D.failWith "Failed to decode outputs (1)"
+                    ]
+                )
             -- fee
-            >> D.field 2 (D.oneOf [ D.natural, D.failWith "Failed to decode fee" ])
+            >> D.field 2
+                (D.oneOf [ D.natural, D.failWith "Failed to decode fee (2)" ])
             -- ttl
-            >> D.field 3 (D.oneOf [ D.natural, D.failWith "Failed to decode TTL" ])
+            >> D.optionalField 3
+                (D.oneOf [ D.natural, D.failWith "Failed to decode TTL (3)" ])
             -- certificates
-            >> D.optionalField 4 (D.oneOf [ D.list decodeCertificate, D.failWith "Failed to decode certificate" ])
+            >> D.optionalField 4
+                (D.oneOf
+                    [ D.set decodeCertificate
+                    , D.failWith "Failed to decode certificates (4)"
+                    ]
+                )
             -- withdrawals
-            >> D.optionalField 5 (D.oneOf [ decodeWithdrawals, D.failWith "Failed to decode withdrawals" ])
+            >> D.optionalField 5
+                (D.oneOf [ decodeWithdrawals, D.failWith "Failed to decode withdrawals (5)" ])
             -- update
-            >> D.optionalField 6 (D.oneOf [ decodeUpdate, D.failWith "Failed to decode protocol update" ])
-            -- metadata hash
-            >> D.optionalField 7 (D.oneOf [ D.map Bytes.fromBytes D.bytes, D.failWith "Failed to decode metadata hash" ])
+            >> D.optionalField 6
+                (D.oneOf [ decodeUpdate, D.failWith "Failed to decode protocol update (6)" ])
+            -- auxiliary data hash
+            >> D.optionalField 7
+                (D.oneOf
+                    [ D.map Bytes.fromBytes D.bytes
+                    , D.failWith "Failed to decode auxiliary data hash (7)"
+                    ]
+                )
+            -- validity interval start
+            >> D.optionalField 8
+                (D.oneOf [ D.int, D.failWith "Failed to decode validity interval start (8)" ])
+            -- mint
+            >> D.optionalField 9
+                (D.oneOf [ MultiAsset.mintFromCbor, D.failWith "Failed to decode mint (9)" ])
+            -- script data hash
+            >> D.optionalField 11
+                (D.oneOf
+                    [ D.map Bytes.fromBytes D.bytes
+                    , D.failWith "Failed to decode script data hash (11)"
+                    ]
+                )
+            -- collateral
+            >> D.optionalField 13
+                (D.oneOf
+                    [ D.set Utxo.decodeOutputReference
+                    , D.failWith "Failed to decode collateral (13)"
+                    ]
+                )
+            -- required signers
+            >> D.optionalField 14
+                (D.oneOf
+                    [ D.set (D.map Bytes.fromBytes D.bytes)
+                    , D.failWith "Failed to decode required signers (14)"
+                    ]
+                )
+            -- network ID
+            >> D.optionalField 15
+                (D.oneOf [ decodeNetworkId, D.failWith "Failed to decode network id (15)" ])
+            -- collateral return
+            >> D.optionalField 16
+                (D.oneOf [ Utxo.decodeOutput, D.failWith "Failed to decode collateral return (16)" ])
+            -- total collateral
+            >> D.optionalField 17
+                (D.oneOf [ D.int, D.failWith "Failed to decode total collateral (17)" ])
+            -- reference inputs
+            >> D.optionalField 18
+                (D.oneOf
+                    [ D.set Utxo.decodeOutputReference
+                    , D.failWith "Failed to decode reference inputs (18)"
+                    ]
+                )
+            -- votingProcedures : List ( Voter, List ( ActionId, VotingProcedure ) ) -- 19 Voting procedures
+            >> D.optionalField 19
+                (D.oneOf
+                    [ D.associativeList
+                        Gov.voterFromCbor
+                        (D.associativeList Gov.actionIdFromCbor Gov.votingProcedureFromCbor)
+                    , D.failWith "Failed to decode voting procedures (19)"
+                    ]
+                )
+            -- proposalProcedures : List ProposalProcedure -- 20 Proposal procedures
+            >> D.optionalField 20
+                (D.oneOf
+                    [ D.set Gov.proposalProcedureFromCbor
+                    , D.failWith "Failed to decode proposal procedures (20)"
+                    ]
+                )
+            -- currentTreasuryValue : Maybe Natural -- 21 Current treasury value
+            >> D.optionalField 21
+                (D.oneOf [ D.natural, D.failWith "Failed to decode current treasury value (21)" ])
+            -- treasuryDonation : Maybe Natural -- 22 Donation
+            >> D.optionalField 22
+                (D.oneOf [ D.natural, D.failWith "Failed to decode treasury donation (22)" ])
+
+
+decodeBodyFold : D.Decoder TransactionBody
+decodeBodyFold =
+    D.fold D.int
+        (\k ->
+            case k of
+                -- inputs
+                0 ->
+                    D.oneOf
+                        [ D.list Utxo.decodeOutputReference |> D.map setInputs
+                        , D.failWith "Failed to decode inputs (0)"
+                        ]
+
+                -- outputs
+                1 ->
+                    D.oneOf
+                        [ D.list Utxo.decodeOutput |> D.map setOutputs
+                        , D.failWith "Failed to decode outputs (1)"
+                        ]
+
+                -- fee
+                2 ->
+                    D.oneOf [ D.natural |> D.map setFee, D.failWith "Failed to decode fee (2)" ]
+
+                -- ttl
+                3 ->
+                    D.oneOf [ D.natural |> D.map setTtl, D.failWith "Failed to decode TTL (3)" ]
+
+                -- certificates
+                4 ->
+                    D.oneOf
+                        [ D.set decodeCertificate |> D.map setCertificates
+                        , D.failWith "Failed to decode certificate (4)"
+                        ]
+
+                -- withdrawals
+                5 ->
+                    D.oneOf [ decodeWithdrawals |> D.map setWithdrawals, D.failWith "Failed to decode withdrawals (5)" ]
+
+                -- update
+                6 ->
+                    D.oneOf [ decodeUpdate |> D.map setUpdate, D.failWith "Failed to decode protocol update (6)" ]
+
+                -- auxiliary data hash
+                7 ->
+                    D.oneOf
+                        [ D.map Bytes.fromBytes D.bytes |> D.map setAuxiliaryDataHash
+                        , D.failWith "Failed to decode auxiliary data hash (7)"
+                        ]
+
+                -- validity interval start
+                8 ->
+                    D.oneOf [ D.int |> D.map setValidityIntervalStart, D.failWith "Failed to decode validity interval start (8)" ]
+
+                -- mint
+                9 ->
+                    D.oneOf [ MultiAsset.mintFromCbor |> D.map setMint, D.failWith "Failed to decode mint (9)" ]
+
+                -- (DEPRECATED) expansion rate
+                10 ->
+                    D.succeed identity
+
+                -- script data hash
+                11 ->
+                    D.oneOf
+                        [ D.map Bytes.fromBytes D.bytes |> D.map setScriptDataHash
+                        , D.failWith "Failed to decode script data hash (11)"
+                        ]
+
+                -- (DEPRECATED) decentralization constant
+                12 ->
+                    D.succeed identity
+
+                -- collateral
+                13 ->
+                    D.oneOf
+                        [ D.list Utxo.decodeOutputReference |> D.map setCollateral
+                        , D.failWith "Failed to decode collateral (13)"
+                        ]
+
+                -- required signers
+                14 ->
+                    D.oneOf
+                        [ D.list (D.map Bytes.fromBytes D.bytes) |> D.map setRequiredSigners
+                        , D.failWith "Failed to decode required signers (14)"
+                        ]
+
+                -- network ID
+                15 ->
+                    D.oneOf [ decodeNetworkId |> D.map setNetworkId, D.failWith "Failed to decode network id (15)" ]
+
+                -- collateral return
+                16 ->
+                    D.oneOf [ Utxo.decodeOutput |> D.map setCollateralReturn, D.failWith "Failed to decode collateral return (16)" ]
+
+                -- total collateral
+                17 ->
+                    D.oneOf [ D.int |> D.map setTotalCollateral, D.failWith "Failed to decode total collateral (17)" ]
+
+                -- reference inputs
+                18 ->
+                    D.oneOf
+                        [ D.list Utxo.decodeOutputReference |> D.map setReferenceInputs
+                        , D.failWith "Failed to decode reference inputs (18)"
+                        ]
+
+                _ ->
+                    D.failWith ("Unknown tx body tag: " ++ String.fromInt k)
+        )
+        newBody
 
 
 decodeCertificate : D.Decoder Certificate
@@ -765,27 +1268,27 @@ decodeCertificateHelper length id =
     case ( length, id ) of
         -- stake_registration = (0, stake_credential)
         ( 2, 0 ) ->
-            D.map (\cred -> StakeRegistration { delegator = cred }) decodeStakeCredential
+            D.map (\cred -> StakeRegistrationCert { delegator = cred }) decodeCredential
 
         -- stake_deregistration = (1, stake_credential)
         ( 2, 1 ) ->
-            D.map (\cred -> StakeDeregistration { delegator = cred }) decodeStakeCredential
+            D.map (\cred -> StakeDeregistrationCert { delegator = cred }) decodeCredential
 
         -- stake_delegation = (2, stake_credential, pool_keyhash)
         ( 3, 2 ) ->
             D.map2
-                (\cred poolId -> StakeDelegation { delegator = cred, poolId = poolId })
-                decodeStakeCredential
+                (\cred poolId -> StakeDelegationCert { delegator = cred, poolId = poolId })
+                decodeCredential
                 (D.map Bytes.fromBytes D.bytes)
 
         -- pool_registration = (3, pool_params)
         -- pool_params is of size 9
         ( 10, 3 ) ->
-            D.map PoolRegistration <| D.oneOf [ decodePoolParams, D.failWith "Failed to decode pool params" ]
+            D.map PoolRegistrationCert <| D.oneOf [ Pool.decodeParams, D.failWith "Failed to decode pool params" ]
 
         -- pool_retirement = (4, pool_keyhash, epoch)
         ( 3, 4 ) ->
-            D.map2 (\poolId epoch -> PoolRetirement { poolId = poolId, epoch = epoch })
+            D.map2 (\poolId epoch -> PoolRetirementCert { poolId = poolId, epoch = epoch })
                 (D.map Bytes.fromBytes D.bytes)
                 D.natural
 
@@ -793,7 +1296,7 @@ decodeCertificateHelper length id =
         ( 4, 5 ) ->
             D.map3
                 (\genHash genDelHash vrfKeyHash ->
-                    GenesisKeyDelegation
+                    GenesisKeyDelegationCert
                         { genesisHash = genHash
                         , genesisDelegateHash = genDelHash
                         , vrfKeyHash = vrfKeyHash
@@ -807,6 +1310,96 @@ decodeCertificateHelper length id =
         ( 2, 6 ) ->
             D.map MoveInstantaneousRewardsCert decodeMoveInstantaneousRewards
 
+        -- reg_cert = (7, credential, coin)
+        ( 3, 7 ) ->
+            D.map2
+                (\cred deposit -> RegCert { delegator = cred, deposit = deposit })
+                decodeCredential
+                D.natural
+
+        -- unreg_cert = (8, credential, coin)
+        ( 3, 8 ) ->
+            D.map2
+                (\cred refund -> UnregCert { delegator = cred, refund = refund })
+                decodeCredential
+                D.natural
+
+        -- vote_deleg_cert = (9, credential, drep)
+        ( 3, 9 ) ->
+            D.map2
+                (\cred drep -> VoteDelegCert { delegator = cred, drep = drep })
+                (D.oneOf [ decodeCredential, D.failWith "decodeCredential failed" ])
+                (D.oneOf [ Gov.decodeDrep, D.failWith "decodeDrep failed" ])
+
+        -- stake_vote_deleg_cert = (10, credential, pool_keyhash, drep)
+        ( 4, 10 ) ->
+            D.map3
+                (\cred poolId drep -> StakeVoteDelegCert { delegator = cred, poolId = poolId, drep = drep })
+                decodeCredential
+                (D.map Bytes.fromBytes D.bytes)
+                Gov.decodeDrep
+
+        -- stake_reg_deleg_cert = (11, credential, pool_keyhash, coin)
+        ( 4, 11 ) ->
+            D.map3
+                (\cred poolId deposit -> StakeRegDelegCert { delegator = cred, poolId = poolId, deposit = deposit })
+                decodeCredential
+                (D.map Bytes.fromBytes D.bytes)
+                D.natural
+
+        -- vote_reg_deleg_cert = (12, credential, drep, coin)
+        ( 4, 12 ) ->
+            D.map3
+                (\cred drep deposit -> VoteRegDelegCert { delegator = cred, drep = drep, deposit = deposit })
+                decodeCredential
+                Gov.decodeDrep
+                D.natural
+
+        -- stake_vote_reg_deleg_cert = (13, credential, pool_keyhash, drep, coin)
+        ( 5, 13 ) ->
+            D.map4
+                (\cred poolId drep deposit -> StakeVoteRegDelegCert { delegator = cred, poolId = poolId, drep = drep, deposit = deposit })
+                decodeCredential
+                (D.map Bytes.fromBytes D.bytes)
+                Gov.decodeDrep
+                D.natural
+
+        -- auth_committee_hot_cert = (14, committee_cold_credential, committee_hot_credential)
+        ( 3, 14 ) ->
+            D.map2
+                (\cold hot -> AuthCommitteeHotCert { committeeColdCredential = cold, committeeHotCredential = hot })
+                decodeCredential
+                decodeCredential
+
+        -- resign_committee_cold_cert = (15, committee_cold_credential, anchor / nil)
+        ( 3, 15 ) ->
+            D.map2
+                (\cold anchor -> ResignCommitteeColdCert { committeeColdCredential = cold, anchor = anchor })
+                decodeCredential
+                (D.maybe Gov.decodeAnchor)
+
+        -- reg_drep_cert = (16, drep_credential, coin, anchor / nil)
+        ( 4, 16 ) ->
+            D.map3
+                (\cred deposit anchor -> RegDrepCert { drepCredential = cred, deposit = deposit, anchor = anchor })
+                decodeCredential
+                D.natural
+                (D.maybe Gov.decodeAnchor)
+
+        -- unreg_drep_cert = (17, drep_credential, coin)
+        ( 3, 17 ) ->
+            D.map2
+                (\cred refund -> UnregDrepCert { drepCredential = cred, refund = refund })
+                decodeCredential
+                D.natural
+
+        -- update_drep_cert = (18, drep_credential, anchor / nil)
+        ( 3, 18 ) ->
+            D.map2
+                (\cred anchor -> UpdateDrepCert { drepCredential = cred, anchor = anchor })
+                decodeCredential
+                (D.maybe Gov.decodeAnchor)
+
         _ ->
             D.failWith <|
                 "Unknown length and id for certificate ("
@@ -816,114 +1409,12 @@ decodeCertificateHelper length id =
                     ++ ")"
 
 
-decodeStakeCredential : D.Decoder Credential
-decodeStakeCredential =
-    D.length
-        |> D.andThen
-            (\length ->
-                -- A stake credential contains 2 elements
-                if length == 2 then
-                    D.int
-                        |> D.andThen
-                            (\id ->
-                                if id == 0 then
-                                    -- If the id is 0, it's a vkey hash
-                                    D.map (Address.VKeyHash << Bytes.fromBytes) D.bytes
-
-                                else if id == 1 then
-                                    -- If the id is 1, it's a script hash
-                                    D.map (Address.ScriptHash << Bytes.fromBytes) D.bytes
-
-                                else
-                                    D.fail
-                            )
-
-                else
-                    D.fail
-            )
-
-
-decodePoolParams : D.Decoder PoolParams
-decodePoolParams =
-    D.succeed PoolParams
-        |> D.keep (D.oneOf [ D.map Bytes.fromBytes D.bytes, D.failWith "Failed to decode operator" ])
-        |> D.keep (D.oneOf [ D.map Bytes.fromBytes D.bytes, D.failWith "Failed to decode vrfkeyhash" ])
-        |> D.keep (D.oneOf [ D.natural, D.failWith "Failed to decode pledge" ])
-        |> D.keep D.natural
-        |> D.keep (D.oneOf [ decodeRational, D.failWith "Failed to decode rational" ])
-        |> D.keep (D.oneOf [ Address.decodeReward, D.failWith "Failed to decode reward" ])
-        |> D.keep (D.list (D.map Bytes.fromBytes D.bytes))
-        |> D.keep (D.list <| D.oneOf [ decodeRelay, D.failWith "Failed to decode Relay" ])
-        |> D.keep (D.oneOf [ D.maybe decodePoolMetadata, D.failWith "Failed to decode pool metadata" ])
-
-
-decodeRational : D.Decoder RationalNumber
-decodeRational =
-    D.tag
-        |> D.andThen
-            (\tag ->
-                case tag of
-                    Tag.Unknown 30 ->
-                        D.tuple RationalNumber <|
-                            D.elems
-                                >> D.elem D.int
-                                >> D.elem D.int
-
-                    _ ->
-                        D.fail
-            )
-
-
-decodeRelay : D.Decoder Relay
-decodeRelay =
-    D.length
-        |> D.andThen (\length -> D.int |> D.andThen (decodeRelayHelper length))
-
-
-decodeRelayHelper : Int -> Int -> D.Decoder Relay
-decodeRelayHelper length id =
-    case ( length, id ) of
-        -- single_host_addr = ( 0, port / null, ipv4 / null, ipv6 / null )
-        ( 4, 0 ) ->
-            D.map3 (\port_ ipv4 ipv6 -> SingleHostAddr { port_ = port_, ipv4 = ipv4, ipv6 = ipv6 })
-                (D.maybe D.int)
-                (D.maybe <| D.map Bytes.fromBytes D.bytes)
-                (D.maybe <| D.map Bytes.fromBytes D.bytes)
-
-        -- single_host_name = ( 1, port / null, dns_name )  -- An A or AAAA DNS record
-        ( 3, 1 ) ->
-            D.map2 (\port_ dns -> SingleHostName { port_ = port_, dnsName = dns })
-                (D.maybe D.int)
-                D.string
-
-        -- multi_host_name = ( 2, dns_name )  -- A SRV DNS record
-        ( 2, 2 ) ->
-            D.map (\dns -> MultiHostName { dnsName = dns })
-                D.string
-
-        _ ->
-            D.failWith <|
-                "Unknown length and id for relay ("
-                    ++ String.fromInt length
-                    ++ ", "
-                    ++ String.fromInt id
-                    ++ ")"
-
-
-decodePoolMetadata : D.Decoder PoolMetadata
-decodePoolMetadata =
-    D.tuple PoolMetadata <|
-        D.elems
-            >> D.elem D.string
-            >> D.elem (D.map Bytes.fromBytes D.bytes)
-
-
 decodeMoveInstantaneousRewards : D.Decoder MoveInstantaneousReward
 decodeMoveInstantaneousRewards =
     D.tuple (\source targets -> { source = source, target = StakeCredentials targets }) <|
         D.elems
             >> D.elem decodeRewardSource
-            >> D.elem (D.associativeList decodeStakeCredential D.natural)
+            >> D.elem (D.associativeList decodeCredential D.natural)
 
 
 decodeRewardSource : D.Decoder RewardSource
@@ -952,97 +1443,60 @@ decodeUpdate : D.Decoder Update
 decodeUpdate =
     D.tuple (\updates epoch -> { proposedProtocolParameterUpdates = Bytes.Map.fromList updates, epoch = epoch }) <|
         D.elems
-            >> D.elem (D.associativeList (D.map Bytes.fromBytes D.bytes) decodeProtocolParamUpdate)
+            >> D.elem (D.associativeList (D.map Bytes.fromBytes D.bytes) Gov.decodeProtocolParamUpdate)
             >> D.elem D.natural
-
-
-decodeProtocolParamUpdate : D.Decoder ProtocolParamUpdate
-decodeProtocolParamUpdate =
-    D.record D.int ProtocolParamUpdate <|
-        D.fields
-            -- ? 0:  uint               ; minfee A
-            >> D.optionalField 0 D.natural
-            -- ? 1:  uint               ; minfee B
-            >> D.optionalField 1 D.natural
-            -- ? 2:  uint               ; max block body size
-            >> D.optionalField 2 D.int
-            -- ? 3:  uint               ; max transaction size
-            >> D.optionalField 3 D.int
-            -- ? 4:  uint               ; max block header size
-            >> D.optionalField 4 D.int
-            -- ? 5:  coin               ; key deposit
-            >> D.optionalField 5 D.natural
-            -- ? 6:  coin               ; pool deposit
-            >> D.optionalField 6 D.natural
-            -- ? 7: epoch               ; maximum epoch
-            >> D.optionalField 7 D.natural
-            -- ? 8: uint                ; n_opt: desired number of stake pools
-            >> D.optionalField 8 D.int
-            -- ? 9: rational            ; pool pledge influence
-            >> D.optionalField 9 decodeRational
-            -- ? 10: unit_interval      ; expansion rate
-            >> D.optionalField 10 decodeRational
-            -- ? 11: unit_interval      ; treasury growth rate
-            >> D.optionalField 11 decodeRational
-            -- ? 12: unit_interval      ; d. decentralization constant
-            >> D.optionalField 12 decodeRational
-            -- ? 13: $nonce             ; extra entropy
-            >> D.optionalField 13 decodeExtraEntropy
-            -- ? 14: [protocol_version] ; protocol version
-            >> D.optionalField 14 decodeProtocolVersion
-            -- ? 15: coin               ; min utxo value
-            >> D.optionalField 15 D.natural
-            >> D.optionalField 16 (D.failWith "minPoolCost")
-            >> D.optionalField 17 (D.failWith "adaPerUtxoByte")
-            >> D.optionalField 18 (D.failWith "costModelsForScriptLanguages")
-            >> D.optionalField 19 (D.failWith "executionCosts")
-            >> D.optionalField 20 (D.failWith "maxTxExUnits")
-            >> D.optionalField 21 (D.failWith "maxBlockExUnits")
-            >> D.optionalField 22 (D.failWith "maxValueSize")
-            >> D.optionalField 23 (D.failWith "collateralPercentage")
-            >> D.optionalField 24 (D.failWith "maxCollateralInputs")
-
-
-decodeExtraEntropy : D.Decoder ( Int, Bytes Any )
-decodeExtraEntropy =
-    D.tuple Tuple.pair <|
-        D.elems
-            >> D.elem D.int
-            >> D.elem (D.map Bytes.fromBytes D.bytes)
-
-
-decodeProtocolVersion : D.Decoder ProtocolVersion
-decodeProtocolVersion =
-    D.tuple Tuple.pair <|
-        D.elems
-            >> D.elem D.int
-            >> D.elem D.int
 
 
 
 -- Decode witness
 
 
-decodeWitness : D.Decoder WitnessSet
-decodeWitness =
-    let
-        witnessBuilder vkeywitness multisigScript bootstrapWitness =
-            { newWitnessSet
-                | vkeywitness = vkeywitness
-                , nativeScripts = multisigScript
-                , bootstrapWitness = bootstrapWitness
-            }
-    in
-    D.record D.int witnessBuilder <|
+{-| Decode a [WitnessSet] from CBOR.
+-}
+decodeWitnessSet : D.Decoder WitnessSet
+decodeWitnessSet =
+    -- TODO: Make it fail for an unknown field. Maybe use D.fold instead.
+    D.record D.int WitnessSet <|
         D.fields
             -- vkeywitness
-            >> D.optionalField 0 (D.list decodeVKeyWitness)
+            >> D.optionalField 0 (D.oneOf [ D.set decodeVKeyWitness, D.failWith "Failed to decode KVeyWitness list" ])
             -- multisig_script
-            >> D.optionalField 1 (D.list decodeNativeScript)
+            >> D.optionalField 1 (D.oneOf [ D.set Script.decodeNativeScript, D.failWith "Failed to decode NativeScript list" ])
             -- bootstrap_witness
-            >> D.optionalField 2 (D.list decodeBootstrapWitness)
+            >> D.optionalField 2 (D.oneOf [ D.set decodeBootstrapWitness, D.failWith "Failed to decode bootstrap witness" ])
+            -- plutus_v1_script
+            >> D.optionalField 3 (D.oneOf [ D.set (D.map Bytes.fromBytes D.bytes), D.failWith "Failed to decode plutus v1 script" ])
+            -- plutus_data
+            >> D.optionalField 4 (D.oneOf [ D.set Data.fromCbor, D.failWith "Failed to decode plutus data" ])
+            -- redeemer: decode as either array or maps in conway
+            >> D.optionalField 5
+                (D.oneOf
+                    [ D.list Redeemer.fromCborArray
+                    , D.associativeList
+                        -- [tag, index]
+                        (D.tuple Tuple.pair <|
+                            D.elems
+                                >> D.elem Redeemer.tagFromCbor
+                                >> D.elem D.int
+                        )
+                        -- [data, exUnits]
+                        (D.tuple Tuple.pair <|
+                            D.elems
+                                >> D.elem Data.fromCbor
+                                >> D.elem Redeemer.exUnitsFromCbor
+                        )
+                        |> D.map (List.map (\( ( tag, index ), ( data, exUnits ) ) -> Redeemer tag index data exUnits))
+                    , D.failWith "Failed to decode redeemer"
+                    ]
+                )
+            -- plutus_v2_script
+            >> D.optionalField 6 (D.oneOf [ D.set (D.map Bytes.fromBytes D.bytes), D.failWith "Failed to decode plutus v2 script" ])
+            -- plutus_v3_script
+            >> D.optionalField 7 (D.oneOf [ D.set (D.map Bytes.fromBytes D.bytes), D.failWith "Failed to decode plutus v3 script" ])
 
 
+{-| Decode from CBOR one VKey witness signature.
+-}
 decodeVKeyWitness : D.Decoder VKeyWitness
 decodeVKeyWitness =
     D.tuple
@@ -1055,11 +1509,6 @@ decodeVKeyWitness =
         D.elems
             >> D.elem D.bytes
             >> D.elem D.bytes
-
-
-decodeNativeScript : D.Decoder NativeScript
-decodeNativeScript =
-    D.failWith "decodeNativeScript (not implemented) failed to decode"
 
 
 decodeBootstrapWitness : D.Decoder BootstrapWitness
@@ -1080,39 +1529,107 @@ decodeBootstrapWitness =
             >> D.elem D.bytes
 
 
+decodeNetworkId : D.Decoder NetworkId
+decodeNetworkId =
+    D.int
+        |> D.andThen
+            (\id ->
+                case id of
+                    0 ->
+                        D.succeed Testnet
+
+                    1 ->
+                        D.succeed Mainnet
+
+                    _ ->
+                        D.failWith ("Uknown network id: " ++ String.fromInt id)
+            )
+
+
 
 -- Helper definitions
 
 
-newBody : TransactionBody
-newBody =
-    { inputs = []
-    , outputs = []
-    , fee = Nothing
-    , ttl = Nothing
-    , certificates = []
-    , withdrawals = []
-    , update = Nothing
-    , auxiliaryDataHash = Nothing
-    , validityIntervalStart = Nothing
-    , mint = MultiAsset.empty
-    , scriptDataHash = Nothing
-    , collateral = []
-    , requiredSigners = []
-    , networkId = Nothing
-    , collateralReturn = Nothing
-    , totalCollateral = Nothing
-    , referenceInputs = []
-    }
+setInputs : List OutputReference -> TransactionBody -> TransactionBody
+setInputs inputs body =
+    { body | inputs = inputs }
 
 
-newWitnessSet : WitnessSet
-newWitnessSet =
-    { vkeywitness = Nothing
-    , nativeScripts = Nothing
-    , bootstrapWitness = Nothing
-    , plutusV1Script = Nothing
-    , plutusData = Nothing
-    , redeemer = Nothing
-    , plutusV2Script = Nothing
-    }
+setOutputs : List Output -> TransactionBody -> TransactionBody
+setOutputs outputs body =
+    { body | outputs = outputs }
+
+
+setFee : Natural -> TransactionBody -> TransactionBody
+setFee fee body =
+    { body | fee = fee }
+
+
+setTtl : Natural -> TransactionBody -> TransactionBody
+setTtl ttl body =
+    { body | ttl = Just ttl }
+
+
+setCertificates : List Certificate -> TransactionBody -> TransactionBody
+setCertificates certificates body =
+    { body | certificates = certificates }
+
+
+setWithdrawals : List ( StakeAddress, Natural ) -> TransactionBody -> TransactionBody
+setWithdrawals withdrawals body =
+    { body | withdrawals = withdrawals }
+
+
+setUpdate : Update -> TransactionBody -> TransactionBody
+setUpdate update body =
+    { body | update = Just update }
+
+
+setAuxiliaryDataHash : Bytes AuxiliaryData.Hash -> TransactionBody -> TransactionBody
+setAuxiliaryDataHash hash body =
+    { body | auxiliaryDataHash = Just hash }
+
+
+setValidityIntervalStart : Int -> TransactionBody -> TransactionBody
+setValidityIntervalStart start body =
+    { body | validityIntervalStart = Just start }
+
+
+setMint : MultiAsset Integer -> TransactionBody -> TransactionBody
+setMint mint body =
+    { body | mint = mint }
+
+
+setScriptDataHash : Bytes ScriptDataHash -> TransactionBody -> TransactionBody
+setScriptDataHash hash body =
+    { body | scriptDataHash = Just hash }
+
+
+setCollateral : List OutputReference -> TransactionBody -> TransactionBody
+setCollateral collateral body =
+    { body | collateral = collateral }
+
+
+setRequiredSigners : List (Bytes CredentialHash) -> TransactionBody -> TransactionBody
+setRequiredSigners signers body =
+    { body | requiredSigners = signers }
+
+
+setNetworkId : NetworkId -> TransactionBody -> TransactionBody
+setNetworkId networkId body =
+    { body | networkId = Just networkId }
+
+
+setCollateralReturn : Output -> TransactionBody -> TransactionBody
+setCollateralReturn collateralReturn body =
+    { body | collateralReturn = Just collateralReturn }
+
+
+setTotalCollateral : Int -> TransactionBody -> TransactionBody
+setTotalCollateral totalCollateral body =
+    { body | totalCollateral = Just totalCollateral }
+
+
+setReferenceInputs : List OutputReference -> TransactionBody -> TransactionBody
+setReferenceInputs refInputs body =
+    { body | referenceInputs = refInputs }

@@ -1,16 +1,17 @@
 module Cardano.Cip30 exposing
-    ( WalletDescriptor, Wallet, walletDescriptor
+    ( WalletDescriptor, Wallet, walletDescriptor, walletChangeAddress, updateChangeAddress
     , Request, encodeRequest, Paginate
     , discoverWallets, enableWallet
     , getExtensions, getNetworkId, getUtxos, getCollateral, getBalance
     , getUsedAddresses, getUnusedAddresses, getChangeAddress, getRewardAddresses
-    , signData
-    , Response(..), ApiResponse(..), Utxo, DataSignature, responseDecoder
+    , signTx, signTxCbor, KeyType(..), signData, submitTx, submitTxCbor
+    , apiRequest
+    , Response(..), ApiResponse(..), Utxo, DataSignature, responseDecoder, apiDecoder, utxoDecoder, hexCborDecoder, addressDecoder, dataSignatureDecoder
     )
 
 {-| CIP 30 support.
 
-@docs WalletDescriptor, Wallet, walletDescriptor
+@docs WalletDescriptor, Wallet, walletDescriptor, walletChangeAddress, updateChangeAddress
 
 @docs Request, encodeRequest, Paginate
 
@@ -20,20 +21,28 @@ module Cardano.Cip30 exposing
 
 @docs getUsedAddresses, getUnusedAddresses, getChangeAddress, getRewardAddresses
 
-@docs signData
+@docs signTx, signTxCbor, KeyType, signData, submitTx, submitTxCbor
 
-@docs Response, ApiResponse, Utxo, DataSignature, responseDecoder
+@docs apiRequest
+
+@docs Response, ApiResponse, Utxo, DataSignature, responseDecoder, apiDecoder, utxoDecoder, hexCborDecoder, addressDecoder, dataSignatureDecoder
 
 -}
 
 import Bytes.Comparable as Bytes exposing (Bytes)
-import Cardano.Value as ECValue
+import Cardano.Address as Address exposing (Address, CredentialHash, NetworkId, StakeAddress)
+import Cardano.Transaction as Transaction exposing (Transaction, VKeyWitness)
+import Cardano.Utxo as Utxo exposing (TransactionId)
+import Cardano.Value as CValue
 import Cbor exposing (CborItem)
 import Cbor.Decode
 import Cbor.Encode
-import Hex.Convert
+import Cbor.Encode.Extra
+import Dict exposing (Dict)
+import Hex
 import Json.Decode as JDecode exposing (Decoder, Value)
 import Json.Encode as JEncode
+import Natural exposing (Natural)
 
 
 {-| The type returned when asking for available wallets.
@@ -53,6 +62,7 @@ type alias WalletDescriptor =
 type Wallet
     = Wallet
         { descriptor : WalletDescriptor
+        , changeAddress : Address
         , api : Value
         , walletHandle : Value
         }
@@ -65,14 +75,29 @@ walletDescriptor (Wallet { descriptor }) =
     descriptor
 
 
+{-| Retrieve the change address associated with a [Wallet] object.
+-}
+walletChangeAddress : Wallet -> Address
+walletChangeAddress (Wallet { changeAddress }) =
+    changeAddress
+
+
+{-| Update the change address associated with a [Wallet] object.
+-}
+updateChangeAddress : Address -> Wallet -> Wallet
+updateChangeAddress changeAddress (Wallet wallet) =
+    Wallet { wallet | changeAddress = changeAddress }
+
+
 {-| Opaque type for requests to be sent to the wallets.
 -}
 type Request
     = DiscoverWallets
-    | Enable { id : String, extensions : List Int }
+    | Enable { id : String, extensions : List Int, watchInterval : Maybe Int }
     | ApiRequest
         { id : String
         , api : Value
+        , extension : Maybe Int
         , method : String
         , args : List Value
         }
@@ -94,10 +119,13 @@ discoverWallets =
 Will typically be followed by a response of the [EnabledWallet] variant
 containing a [Wallet] to be stored in your model.
 
+Optionally, you can watch for changes of the selected wallet at a regular interval (in seconds).
+Each time, the wallet will check the current change address and notify with a `ChangeAddress` API response if it has changed.
+
 -}
-enableWallet : { id : String, extensions : List Int } -> Request
-enableWallet idAndExtensions =
-    Enable idAndExtensions
+enableWallet : { id : String, extensions : List Int, watchInterval : Maybe Int } -> Request
+enableWallet parameters =
+    Enable parameters
 
 
 {-| Get the list of extensions enabled by the wallet.
@@ -107,23 +135,24 @@ This feature isn't well supported yet by wallets (as of 2023-10).
 -}
 getExtensions : Wallet -> Request
 getExtensions wallet =
-    apiRequest wallet "getExtensions" []
+    apiRequest wallet Nothing "getExtensions" []
 
 
 {-| Get the current network ID of the wallet.
 -}
 getNetworkId : Wallet -> Request
 getNetworkId wallet =
-    apiRequest wallet "getNetworkId" []
+    apiRequest wallet Nothing "getNetworkId" []
 
 
 {-| Get a list of UTxOs in the wallet.
 -}
-getUtxos : Wallet -> { amount : Maybe ECValue.Value, paginate : Maybe Paginate } -> Request
+getUtxos : Wallet -> { amount : Maybe CValue.Value, paginate : Maybe Paginate } -> Request
 getUtxos wallet { amount, paginate } =
     apiRequest wallet
+        Nothing
         "getUtxos"
-        [ encodeMaybe (\a -> ECValue.encode a |> encodeCborHex) amount
+        [ encodeMaybe (\a -> CValue.encode a |> encodeCborHex) amount
         , encodeMaybe encodePaginate paginate
         ]
 
@@ -136,19 +165,19 @@ More info about why that is in the [CIP 30 spec][cip-collateral].
 [cip-collateral]: https://cips.cardano.org/cips/cip30/#apigetcollateralparamsamountcborcoinpromisetransactionunspentoutputnull
 
 -}
-getCollateral : Wallet -> { amount : ECValue.Value } -> Request
+getCollateral : Wallet -> { amount : Natural } -> Request
 getCollateral wallet { amount } =
     let
         params =
-            JEncode.object [ ( "amount", ECValue.encode amount |> encodeCborHex ) ]
+            JEncode.object [ ( "amount", Cbor.Encode.Extra.natural amount |> encodeCborHex ) ]
     in
-    apiRequest wallet "getCollateral" [ params ]
+    apiRequest wallet Nothing "getCollateral" [ params ]
 
 
 encodeCborHex : Cbor.Encode.Encoder -> Value
 encodeCborHex cborEncoder =
     Cbor.Encode.encode cborEncoder
-        |> Hex.Convert.toString
+        |> Hex.fromBytes
         |> JEncode.string
 
 
@@ -162,7 +191,7 @@ encodeMaybe encode maybe =
 -}
 getBalance : Wallet -> Request
 getBalance wallet =
-    apiRequest wallet "getBalance" []
+    apiRequest wallet Nothing "getBalance" []
 
 
 {-| Get a list of used addresses from the wallet.
@@ -173,7 +202,7 @@ Do not rely on this as a source of truth to get all addresses of a user.
 -}
 getUsedAddresses : Wallet -> { paginate : Maybe Paginate } -> Request
 getUsedAddresses wallet { paginate } =
-    apiRequest wallet "getUsedAddresses" [ encodeMaybe encodePaginate paginate ]
+    apiRequest wallet Nothing "getUsedAddresses" [ encodeMaybe encodePaginate paginate ]
 
 
 {-| Get a list of unused addresses.
@@ -184,32 +213,79 @@ It is not consistent and not compatible with single-address wallets.
 -}
 getUnusedAddresses : Wallet -> Request
 getUnusedAddresses wallet =
-    apiRequest wallet "getUnusedAddresses" []
+    apiRequest wallet Nothing "getUnusedAddresses" []
 
 
 {-| Get an address that can be used to send funds to this wallet.
 -}
 getChangeAddress : Wallet -> Request
 getChangeAddress wallet =
-    apiRequest wallet "getChangeAddress" []
+    apiRequest wallet Nothing "getChangeAddress" []
 
 
 {-| Get addresses used to withdraw staking rewards.
 -}
 getRewardAddresses : Wallet -> Request
 getRewardAddresses wallet =
-    apiRequest wallet "getRewardAddresses" []
+    apiRequest wallet Nothing "getRewardAddresses" []
 
 
-{-| Sign an arbitrary payload with your stake key.
+{-| Sign a transaction.
 -}
-signData : Wallet -> { addr : String, payload : Bytes a } -> Request
-signData wallet { addr, payload } =
-    apiRequest wallet "signData" [ JEncode.string addr, JEncode.string <| Bytes.toString payload ]
+signTx : Wallet -> { partialSign : Bool } -> Transaction -> Request
+signTx wallet partialSign tx =
+    signTxCbor wallet partialSign (Transaction.serialize tx)
+
+
+{-| Sign a transaction, already CBOR-encoded (to avoid deserialization-serialization mismatch).
+-}
+signTxCbor : Wallet -> { partialSign : Bool } -> Bytes Transaction -> Request
+signTxCbor wallet { partialSign } txBytes =
+    apiRequest wallet Nothing "signTx" [ JEncode.string (Bytes.toHex txBytes), JEncode.bool partialSign ]
+
+
+{-| Key type used for data signature.
+-}
+type KeyType
+    = PaymentKey
+    | StakeKey
+
+
+{-| Sign an arbitrary payload with your wallet keys.
+You can provide one of your payment or stake credential handled by the wallet.
+-}
+signData : Wallet -> { networkId : NetworkId, keyType : KeyType, keyHash : Bytes CredentialHash, payload : Bytes a } -> Request
+signData wallet { networkId, keyType, keyHash, payload } =
+    let
+        addrString =
+            case keyType of
+                PaymentKey ->
+                    Address.enterprise networkId keyHash
+                        |> Address.toBech32
+
+                StakeKey ->
+                    StakeAddress networkId (Address.VKeyHash keyHash)
+                        |> Address.stakeAddressToBytes
+                        |> Bytes.toHex
+    in
+    apiRequest wallet Nothing "signData" [ JEncode.string addrString, JEncode.string <| Bytes.toHex payload ]
+
+
+{-| Encode a transaction and submit it via the wallet.
+-}
+submitTx : Wallet -> Transaction -> Request
+submitTx wallet tx =
+    submitTxCbor wallet (Transaction.serialize tx)
+
+
+{-| Submit a transaction, already CBOR-encoded (to avoid deserialization-serialization mismatch).
+-}
+submitTxCbor : Wallet -> Bytes Transaction -> Request
+submitTxCbor wallet txBytes =
+    apiRequest wallet Nothing "submitTx" [ JEncode.string (Bytes.toHex txBytes) ]
 
 
 
--- api.signTx(tx: cbor\, partialSign: bool = false)
 -- api.submitTx(tx: cbor\)
 
 
@@ -224,11 +300,17 @@ encodePaginate { page, limit } =
     JEncode.object [ ( "page", JEncode.int page ), ( "limit", JEncode.int limit ) ]
 
 
-apiRequest : Wallet -> String -> List Value -> Request
-apiRequest (Wallet { descriptor, api }) method args =
+{-| Make a CIP-30 API request.
+
+This is mainly a helper function, exposed for implementors of extensions, like CIP-95.
+
+-}
+apiRequest : Wallet -> Maybe Int -> String -> List Value -> Request
+apiRequest (Wallet { descriptor, api }) extension method args =
     ApiRequest
         { id = descriptor.id
         , api = api
+        , extension = extension
         , method = method
         , args = args
         }
@@ -243,18 +325,20 @@ encodeRequest request =
             JEncode.object
                 [ ( "requestType", JEncode.string "cip30-discover" ) ]
 
-        Enable { id, extensions } ->
+        Enable { id, extensions, watchInterval } ->
             JEncode.object
                 [ ( "requestType", JEncode.string "cip30-enable" )
                 , ( "id", JEncode.string id )
                 , ( "extensions", JEncode.list JEncode.int extensions )
+                , ( "watchInterval", Maybe.map JEncode.int watchInterval |> Maybe.withDefault JEncode.null )
                 ]
 
-        ApiRequest { id, api, method, args } ->
+        ApiRequest { id, api, extension, method, args } ->
             JEncode.object
                 [ ( "requestType", JEncode.string "cip30-api" )
                 , ( "id", JEncode.string id )
                 , ( "api", api )
+                , ( "extension", JEncode.int <| Maybe.withDefault 30 extension )
                 , ( "method", JEncode.string method )
                 , ( "args", JEncode.list identity args )
                 ]
@@ -262,11 +346,11 @@ encodeRequest request =
 
 {-| Response type for responses from the browser wallets.
 -}
-type Response
+type Response apiResponse
     = AvailableWallets (List WalletDescriptor)
     | EnabledWallet Wallet
-    | ApiResponse { walletId : String } ApiResponse
-    | Error String
+    | ApiResponse { walletId : String } apiResponse
+    | ApiError { walletId : Maybe String, code : Int, info : String }
     | UnhandledResponseType String
 
 
@@ -274,23 +358,28 @@ type Response
 -}
 type ApiResponse
     = Extensions (List Int)
-    | NetworkId Int
-    | WalletUtxos (Maybe (List Utxo))
-    | Collateral (Maybe (List Utxo))
-    | WalletBalance CborItem
-    | UsedAddresses (List String)
-    | UnusedAddresses (List String)
-    | ChangeAddress String
-    | RewardAddresses (List String)
+    | NetworkId NetworkId
+    | WalletUtxos (List Utxo)
+    | Collateral (List Utxo)
+    | WalletBalance CValue.Value
+    | UsedAddresses (List Address)
+    | UnusedAddresses (List Address)
+    | ChangeAddress Address
+    | RewardAddresses (List Address)
+      -- TODO: should we also return the txBeforeSignature?
+      -- It would make auto submitting easier
+    | SignedTx (List VKeyWitness)
     | SignedData DataSignature
+    | SubmittedTx (Bytes TransactionId)
+    | UnhandledApiResponse String
 
 
 {-| UTxO type holding the reference and actual output.
 -}
 type alias Utxo =
-    { outputReference : CborItem -- Transaction.Input
-    , output : CborItem -- Transaction.Output
-    }
+    ( Utxo.OutputReference -- Transaction.Input
+    , Utxo.Output -- Transaction.Output
+    )
 
 
 {-| Signature returned from the wallet after signing a payload with your stake key.
@@ -303,8 +392,8 @@ type alias DataSignature =
 
 {-| Decoder for the [Response] type.
 -}
-responseDecoder : Decoder Response
-responseDecoder =
+responseDecoder : Dict Int (String -> Decoder apiResponse) -> Decoder (Response apiResponse)
+responseDecoder apiDecoders =
     JDecode.field "responseType" JDecode.string
         |> JDecode.andThen
             (\responseType ->
@@ -316,23 +405,40 @@ responseDecoder =
                         enableDecoder
 
                     "cip30-api" ->
-                        JDecode.field "method" JDecode.string
+                        JDecode.map3 (\ext id method -> ( ext, id, method ))
+                            (JDecode.field "extension" JDecode.int)
+                            (JDecode.field "walletId" JDecode.string)
+                            (JDecode.field "method" JDecode.string)
                             |> JDecode.andThen
-                                (\method ->
-                                    JDecode.field "walletId" JDecode.string
-                                        |> JDecode.andThen (apiDecoder method)
+                                (\( ext, id, method ) ->
+                                    Dict.get ext apiDecoders
+                                        |> Maybe.map (\decoder -> JDecode.map (ApiResponse { walletId = id }) <| decoder method)
+                                        |> Maybe.withDefault (JDecode.fail <| "No API decoder provided for extension " ++ String.fromInt ext)
                                 )
 
                     "cip30-error" ->
-                        JDecode.field "error" JDecode.string
-                            |> JDecode.map Error
+                        JDecode.map2 (\walletId error -> ApiError { walletId = walletId, code = error.code, info = error.info })
+                            (JDecode.field "walletId" <| JDecode.maybe JDecode.string)
+                            (JDecode.field "error" errorDecoder)
 
                     _ ->
                         JDecode.succeed (UnhandledResponseType responseType)
             )
 
 
-discoverDecoder : Decoder Response
+errorDecoder : Decoder { code : Int, info : String }
+errorDecoder =
+    JDecode.oneOf
+        [ JDecode.map2 (\code info -> { code = code, info = info })
+            (JDecode.field "code" JDecode.int)
+            (JDecode.field "info" JDecode.string)
+        , JDecode.map (\msg -> { code = 0, info = msg })
+            (JDecode.field "message" JDecode.string)
+        , JDecode.map (\msg -> { code = 0, info = msg }) JDecode.string
+        ]
+
+
+discoverDecoder : Decoder (Response a)
 discoverDecoder =
     JDecode.list descriptorDecoder
         |> JDecode.field "wallets"
@@ -360,72 +466,88 @@ descriptorDecoder =
         (JDecode.field "supportedExtensions" (JDecode.list extensionDecoder))
 
 
-enableDecoder : Decoder Response
+enableDecoder : Decoder (Response a)
 enableDecoder =
     JDecode.map EnabledWallet <|
-        JDecode.map3
+        JDecode.map4
             -- Explicit constructor to avoid messing with fields order
-            (\descriptor api walletHandle ->
+            (\descriptor changeAddress api walletHandle ->
                 Wallet
                     { descriptor = descriptor
+                    , changeAddress = changeAddress
                     , api = api
                     , walletHandle = walletHandle
                     }
             )
             (JDecode.field "descriptor" descriptorDecoder)
+            (JDecode.field "changeAddress" addressDecoder)
             (JDecode.field "api" JDecode.value)
             (JDecode.field "walletHandle" JDecode.value)
 
 
-apiDecoder : String -> String -> Decoder Response
-apiDecoder method walletId =
+{-| API response decoder for CIP-30.
+Intented to be provided as argument to the `responseDecoder` function.
+-}
+apiDecoder : String -> Decoder ApiResponse
+apiDecoder method =
     case method of
         "getExtensions" ->
-            JDecode.map (\r -> ApiResponse { walletId = walletId } (Extensions r))
-                (JDecode.field "response" <| JDecode.list extensionDecoder)
+            (JDecode.field "response" <| JDecode.list extensionDecoder)
+                |> JDecode.map Extensions
 
         "getNetworkId" ->
-            JDecode.map (\n -> ApiResponse { walletId = walletId } (NetworkId n))
-                (JDecode.field "response" JDecode.int)
+            JDecode.field "response" networkIdDecoder
+                |> JDecode.map NetworkId
 
         "getUtxos" ->
             JDecode.list utxoDecoder
                 |> JDecode.nullable
                 |> JDecode.field "response"
-                |> JDecode.map (\utxos -> ApiResponse { walletId = walletId } (WalletUtxos utxos))
+                |> JDecode.map (\utxos -> WalletUtxos <| Maybe.withDefault [] utxos)
 
         "getCollateral" ->
             JDecode.list utxoDecoder
                 |> JDecode.nullable
                 |> JDecode.field "response"
-                |> JDecode.map (\utxos -> ApiResponse { walletId = walletId } (Collateral utxos))
+                |> JDecode.map (\utxos -> Collateral <| Maybe.withDefault [] utxos)
 
         "getBalance" ->
-            JDecode.map (\b -> ApiResponse { walletId = walletId } (WalletBalance b))
-                (JDecode.field "response" <| hexCborDecoder Cbor.Decode.any)
+            (JDecode.field "response" <| hexCborDecoder CValue.fromCbor)
+                |> JDecode.map WalletBalance
 
         "getUsedAddresses" ->
-            JDecode.map (\r -> ApiResponse { walletId = walletId } (UsedAddresses r))
-                (JDecode.field "response" <| JDecode.list JDecode.string)
+            (JDecode.field "response" <| JDecode.list addressDecoder)
+                |> JDecode.map UsedAddresses
 
         "getUnusedAddresses" ->
-            JDecode.map (\r -> ApiResponse { walletId = walletId } (UnusedAddresses r))
-                (JDecode.field "response" <| JDecode.list JDecode.string)
+            (JDecode.field "response" <| JDecode.list addressDecoder)
+                |> JDecode.map UnusedAddresses
 
         "getChangeAddress" ->
-            JDecode.map (\r -> ApiResponse { walletId = walletId } (ChangeAddress r))
-                (JDecode.field "response" JDecode.string)
+            JDecode.field "response" addressDecoder
+                |> JDecode.map ChangeAddress
 
         "getRewardAddresses" ->
-            JDecode.map (\r -> ApiResponse { walletId = walletId } (RewardAddresses r))
-                (JDecode.field "response" <| JDecode.list JDecode.string)
+            (JDecode.field "response" <| JDecode.list addressDecoder)
+                |> JDecode.map RewardAddresses
+
+        "signTx" ->
+            Transaction.decodeWitnessSet
+                |> Cbor.Decode.map (\w -> Maybe.withDefault [] w.vkeywitness)
+                |> hexCborDecoder
+                |> JDecode.field "response"
+                |> JDecode.map SignedTx
 
         "signData" ->
-            JDecode.map (\r -> ApiResponse { walletId = walletId } (SignedData r))
-                (JDecode.field "response" <| dataSignatureDecoder)
+            (JDecode.field "response" <| dataSignatureDecoder)
+                |> JDecode.map SignedData
+
+        "submitTx" ->
+            JDecode.field "response" JDecode.string
+                |> JDecode.map (\r -> SubmittedTx (Bytes.fromHexUnchecked r))
 
         _ ->
-            JDecode.succeed <| UnhandledResponseType ("Unknown API call: " ++ method)
+            JDecode.succeed <| UnhandledApiResponse ("Unknown API call: " ++ method)
 
 
 extensionDecoder : Decoder Int
@@ -433,15 +555,41 @@ extensionDecoder =
     JDecode.field "cip" JDecode.int
 
 
+{-| Decode UTxO pairs encoded as CBOR in a hex JSON field.
+-}
 utxoDecoder : Decoder Utxo
 utxoDecoder =
     hexCborDecoder <|
-        Cbor.Decode.tuple Utxo <|
+        Cbor.Decode.tuple Tuple.pair <|
             Cbor.Decode.elems
-                >> Cbor.Decode.elem Cbor.Decode.any
-                >> Cbor.Decode.elem Cbor.Decode.any
+                >> Cbor.Decode.elem Utxo.decodeOutputReference
+                >> Cbor.Decode.elem Utxo.decodeOutput
 
 
+networkIdDecoder : Decoder NetworkId
+networkIdDecoder =
+    JDecode.map Address.networkIdFromInt JDecode.int
+        |> JDecode.andThen (Maybe.map JDecode.succeed >> Maybe.withDefault (JDecode.fail "unknown network id"))
+
+
+{-| JSON decoder for an [Address] encoded as hexadecimal string.
+-}
+addressDecoder : Decoder Address
+addressDecoder =
+    JDecode.string
+        |> JDecode.andThen
+            (\str ->
+                case Maybe.andThen Address.fromBytes (Bytes.fromHex str) of
+                    Just address ->
+                        JDecode.succeed address
+
+                    _ ->
+                        JDecode.fail ("Invalid address: " ++ str)
+            )
+
+
+{-| Helper function to decode data signatures.
+-}
 dataSignatureDecoder : Decoder DataSignature
 dataSignatureDecoder =
     JDecode.map2 DataSignature
@@ -449,12 +597,14 @@ dataSignatureDecoder =
         (JDecode.field "key" <| hexCborDecoder Cbor.Decode.any)
 
 
+{-| Helper function to decode CBOR as hex in JSON.
+-}
 hexCborDecoder : Cbor.Decode.Decoder a -> Decoder a
 hexCborDecoder decoder =
     JDecode.string
         |> JDecode.andThen
             (\str ->
-                case Hex.Convert.toBytes str of
+                case Hex.toBytes str of
                     Just bytes ->
                         case Cbor.Decode.decode decoder bytes of
                             Just a ->

@@ -1,21 +1,23 @@
 module Cbor.Encode.Extra exposing
-    ( natural
+    ( natural, integer
     , nonEmptyField
-    , ledgerList, ledgerDict, ledgerAssociativeList
+    , associativeList, indefiniteList, beginBytes
     )
 
 {-| Extra CBOR encoding utility functions.
 
-@docs natural
+@docs natural, integer
 @docs nonEmptyField
-@docs ledgerList, ledgerDict, ledgerAssociativeList
+@docs associativeList, indefiniteList, beginBytes
 
 -}
 
 import Bytes.Comparable as Bytes
+import Cbor
 import Cbor.Encode as E
 import Cbor.Tag as Tag
-import Dict exposing (Dict)
+import Dict.Any
+import Integer as I exposing (Integer)
 import Natural as N exposing (Natural)
 
 
@@ -23,26 +25,101 @@ import Natural as N exposing (Natural)
 -}
 natural : Natural -> E.Encoder
 natural n =
-    if isSafeInt n then
+    if isSafeNat n then
         E.int (N.toInt n)
 
+    else if isU64 n then
+        let
+            msbLsb =
+                N.divModBy (N.fromSafeInt <| 2 ^ 32) n
+                    |> Maybe.map (\( msb, lsb ) -> ( N.toInt msb, N.toInt lsb ))
+                    |> Maybe.withDefault ( 0, 0 )
+        in
+        E.any (Cbor.CborInt64 msbLsb)
+
     else
-        -- TODO: if < 2^64 we should encode as u64 instead!
         let
             -- simple implementation with hex encoding
             -- TODO: improve this with a better performing approach if needed
             nAsBytes =
                 N.toHexString n
                     |> prependWith0IfOddLength
-                    |> Bytes.fromStringUnchecked
+                    |> Bytes.fromHexUnchecked
                     |> Bytes.toBytes
         in
         E.tagged Tag.PositiveBigNum E.bytes nAsBytes
 
 
-isSafeInt : Natural -> Bool
+{-| Encode a large integer number.
+-}
+integer : Integer -> E.Encoder
+integer n =
+    if I.isNonNegative n then
+        natural (I.toNatural n)
+
+    else if isSafeInt n then
+        E.int (I.toInt n)
+
+    else if isNegativeCborU64 n then
+        let
+            msbLsb =
+                I.toNatural n
+                    |> N.divModBy (N.fromSafeInt <| 2 ^ 32)
+                    |> Maybe.map (\( msb, lsb ) -> ( -(N.toInt msb), N.toInt lsb ))
+                    |> Maybe.withDefault ( 0, 0 )
+        in
+        E.any (Cbor.CborInt64 msbLsb)
+
+    else
+        -- Negative big number
+        let
+            -- simple implementation with hex encoding
+            -- TODO: improve this with a better performing approach if needed
+            nAsBytes =
+                I.toHexString (I.add n I.one)
+                    |> String.dropLeft 1
+                    |> prependWith0IfOddLength
+                    |> Bytes.fromHexUnchecked
+                    |> Bytes.toBytes
+        in
+        E.tagged Tag.NegativeBigNum E.bytes nAsBytes
+
+
+isSafeInt : Integer -> Bool
 isSafeInt n =
+    (n |> I.isLessThanOrEqual (I.fromSafeInt I.maxSafeInt))
+        && (n |> I.isGreaterThan (I.fromSafeInt I.minSafeInt))
+
+
+isSafeNat : Natural -> Bool
+isSafeNat n =
     n |> N.isLessThanOrEqual (N.fromSafeInt N.maxSafeInt)
+
+
+isU64 : Natural -> Bool
+isU64 n =
+    n |> N.isLessThan limit64Bits
+
+
+{-| Check if n is >= -(2^64)
+
+BEWARE the >= here and not > since negative CBOR numbers can go up to that.
+Also we don’t check the number sign here, it’s the caller responsability.
+
+-}
+isNegativeCborU64 : Integer -> Bool
+isNegativeCborU64 n =
+    I.toNatural n |> N.isLessThanOrEqual limit64Bits
+
+
+limit32Bits : Natural
+limit32Bits =
+    N.fromSafeInt (2 ^ 32)
+
+
+limit64Bits : Natural
+limit64Bits =
+    N.mul limit32Bits limit32Bits
 
 
 prependWith0IfOddLength : String -> String
@@ -75,47 +152,50 @@ nonEmptyField key isEmpty encode extract =
                )
 
 
-{-| List CBOR encoder that encodes values as indefinite sequences
-if containing 24 or more elements, and as finite for 23 or less elements.
+{-| Encode associative list with canonical ordering of the keys.
+
+The keys in every map must be sorted lowest value to highest.
+Sorting is performed on the bytes of the representation of the key
+data items without paying attention to the 3/5 bit splitting for
+major types. (Note that this rule allows maps that have keys of
+different types, even though that is probably a bad practice that
+could lead to errors in some canonicalization implementations.)
+The sorting rules are:
+
+  - If two keys have different lengths, the shorter one sorts
+    earlier;
+
+  - If two keys have the same length, the one with the lower value
+    in (byte-wise) lexical order sorts earlier.
+
 -}
-ledgerList : (v -> E.Encoder) -> List v -> E.Encoder
-ledgerList valueEncoder list =
-    if List.length list <= 23 then
-        E.list valueEncoder list
-
-    else
-        E.indefiniteList valueEncoder list
+associativeList : (k -> E.Encoder) -> (v -> E.Encoder) -> List ( k, v ) -> E.Encoder
+associativeList encodeKey encodeValue pairs =
+    Dict.Any.fromList (toCanonicalKey encodeKey) pairs
+        |> Dict.Any.toList
+        |> E.associativeList encodeKey encodeValue
 
 
-{-| Dict CBOR encoder that encodes dicts as indefinite sequences
-if the dict contains 24 or more elements, and as finite for 23 or less elements.
+toCanonicalKey : (k -> E.Encoder) -> k -> ( Int, String )
+toCanonicalKey encodeKey k =
+    let
+        encodedKey =
+            E.encode (encodeKey k)
+                |> Bytes.fromBytes
+                |> Bytes.toHex
+    in
+    ( String.length encodedKey, encodedKey )
+
+
+{-| If you really need indefinite lists.
 -}
-ledgerDict : (k -> E.Encoder) -> (v -> E.Encoder) -> Dict k v -> E.Encoder
-ledgerDict keyEncoder valueEncoder dict =
-    if Dict.size dict <= 23 then
-        E.dict keyEncoder valueEncoder dict
-
-    else
-        E.sequence <|
-            E.beginDict
-                :: Dict.foldl
-                    (\key value acc -> E.keyValue keyEncoder valueEncoder ( key, value ) :: acc)
-                    [ E.break ]
-                    dict
+indefiniteList : (a -> E.Encoder) -> List a -> E.Encoder
+indefiniteList =
+    E.indefiniteList
 
 
-{-| Associative list CBOR encoder that encodes (key,value) pairs as indefinite sequences
-if containing 24 or more elements, and as finite for 23 or less elements.
+{-| If you really need to build bytes with indefinite arrays.
 -}
-ledgerAssociativeList : (k -> E.Encoder) -> (v -> E.Encoder) -> List ( k, v ) -> E.Encoder
-ledgerAssociativeList keyEncoder valueEncoder list =
-    if List.length list <= 23 then
-        E.associativeList keyEncoder valueEncoder list
-
-    else
-        E.sequence <|
-            E.beginDict
-                :: List.foldl
-                    (\keyValuePair acc -> E.keyValue keyEncoder valueEncoder keyValuePair :: acc)
-                    [ E.break ]
-                    list
+beginBytes : E.Encoder
+beginBytes =
+    E.beginBytes

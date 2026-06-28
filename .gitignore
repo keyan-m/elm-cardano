@@ -1,2 +1,5 @@
 elm-stuff/
 node_modules/
+target/
+pkg-uplc-wasm/
+TempTxTest.elm
