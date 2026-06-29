@@ -24,10 +24,11 @@ that transaction.
 
 -}
 
-import Bytes.Comparable exposing (Bytes)
+import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum exposing (Metadatum)
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
+import Cbor.Encode as E
 import Dict exposing (Dict)
 import Natural exposing (Natural)
 
@@ -292,3 +293,51 @@ imageMimeToMimeType =
 imageMimeToString : ImageMime -> String
 imageMimeToString (ImageMime subtype) =
     "image/" ++ subtype
+
+
+stringToCbor : String -> E.Encoder
+stringToCbor string =
+    let
+        utf8Width =
+            Bytes.fromText >> Bytes.width
+    in
+    if utf8Width string <= 64 then
+        E.string string
+
+    else
+        E.list E.string (chunksOfBytes 64 string)
+
+
+chunksOfBytes : Int -> String -> List String
+chunksOfBytes maxBytes string =
+    let
+        utf8Width =
+            Bytes.fromText >> Bytes.width
+
+        step char ( current, currentWidth, chunks ) =
+            let
+                charString =
+                    String.fromChar char
+
+                charWidth =
+                    utf8Width charString
+            in
+            if current == "" then
+                ( charString, charWidth, chunks )
+
+            else if currentWidth + charWidth > maxBytes then
+                ( charString, charWidth, current :: chunks )
+
+            else
+                ( current ++ charString, currentWidth + charWidth, chunks )
+    in
+    if maxBytes <= 0 then
+        []
+
+    else
+        case List.foldl step ( "", 0, [] ) (String.toList string) of
+            ( "", _, chunks ) ->
+                List.reverse chunks
+
+            ( current, _, chunks ) ->
+                List.reverse (current :: chunks)
