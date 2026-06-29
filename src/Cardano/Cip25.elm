@@ -2,6 +2,7 @@ module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
     , assetMetadata, empty, file, insertAsset, label, singleton, withFile
+    , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -19,15 +20,18 @@ that transaction.
 
 @docs empty, singleton, insertAsset, assetMetadata, withFile, file, label
 
+@docs stringFromCbor, stringToCbor
+
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
 @docs mimeTypeFromString, mimeTypeToString
 
 -}
 
-import Bytes.Comparable as Bytes exposing (Bytes)
+import Bytes.Comparable exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum exposing (Metadatum)
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
+import Cbor.Decode as D
 import Cbor.Encode as E
 import Dict exposing (Dict)
 import Natural exposing (Natural)
@@ -220,32 +224,35 @@ grammar.
 -}
 isValidMimeTypeName : String -> Bool
 isValidMimeTypeName name =
-    case String.toList name of
-        [] ->
-            False
+    if String.isEmpty name || String.length name > 127 then
+        False
 
-        first :: rest ->
-            String.length name <= 127
-                && (((first >= 'A') && (first <= 'Z'))
-                        || ((first >= 'a') && (first <= 'z'))
-                        || ((first >= '0') && (first <= '9'))
-                   )
-                && List.all
-                    (\char ->
-                        ((char >= 'A') && (char <= 'Z'))
-                            || ((char >= 'a') && (char <= 'z'))
-                            || ((char >= '0') && (char <= '9'))
-                            || (char == '!')
-                            || (char == '#')
-                            || (char == '$')
-                            || (char == '&')
-                            || (char == '-')
-                            || (char == '^')
-                            || (char == '_')
-                            || (char == '.')
-                            || (char == '+')
-                    )
-                    rest
+    else
+        case String.uncons name of
+            Nothing ->
+                False
+
+            Just ( first, rest ) ->
+                (((first >= 'A') && (first <= 'Z'))
+                    || ((first >= 'a') && (first <= 'z'))
+                    || ((first >= '0') && (first <= '9'))
+                )
+                    && String.all
+                        (\char ->
+                            ((char >= 'A') && (char <= 'Z'))
+                                || ((char >= 'a') && (char <= 'z'))
+                                || ((char >= '0') && (char <= '9'))
+                                || (char == '!')
+                                || (char == '#')
+                                || (char == '$')
+                                || (char == '&')
+                                || (char == '-')
+                                || (char == '^')
+                                || (char == '_')
+                                || (char == '.')
+                                || (char == '+')
+                        )
+                        rest
 
 
 {-| A MIME media type constrained to the `image/*` top-level type.
@@ -295,32 +302,81 @@ imageMimeToString (ImageMime subtype) =
     "image/" ++ subtype
 
 
+{-| Decode a CIP-0025 string.
+
+CIP-0025 strings are limited to 64 bytes. Longer string values are represented
+as a list of 64-byte string chunks.
+
+-}
+stringFromCbor : D.Decoder String
+stringFromCbor =
+    let
+        boundedString string =
+            if utf8Width string <= 64 then
+                D.succeed string
+
+            else
+                D.fail
+    in
+    D.oneOf
+        [ D.string |> D.andThen boundedString
+        , D.list (D.string |> D.andThen boundedString)
+            |> D.map String.concat
+        ]
+
+
+{-| Encode a CIP-0025 string.
+
+Strings longer than 64 bytes are encoded as a list of 64-byte string chunks.
+
+-}
 stringToCbor : String -> E.Encoder
 stringToCbor string =
+    case chunksOfBytes 64 string of
+        [] ->
+            E.string ""
+
+        [ chunk ] ->
+            E.string chunk
+
+        chunks ->
+            E.list E.string chunks
+
+
+utf8Width : String -> Int
+utf8Width =
+    String.foldl (\char width -> width + utf8CharWidth char) 0
+
+
+utf8CharWidth : Char -> Int
+utf8CharWidth char =
     let
-        utf8Width =
-            Bytes.fromText >> Bytes.width
+        code =
+            Char.toCode char
     in
-    if utf8Width string <= 64 then
-        E.string string
+    if code <= 127 then
+        1
+
+    else if code <= 2047 then
+        2
+
+    else if code <= 65535 then
+        3
 
     else
-        E.list E.string (chunksOfBytes 64 string)
+        4
 
 
 chunksOfBytes : Int -> String -> List String
 chunksOfBytes maxBytes string =
     let
-        utf8Width =
-            Bytes.fromText >> Bytes.width
-
         step char ( current, currentWidth, chunks ) =
             let
                 charString =
                     String.fromChar char
 
                 charWidth =
-                    utf8Width charString
+                    utf8CharWidth char
             in
             if current == "" then
                 ( charString, charWidth, chunks )
@@ -335,7 +391,7 @@ chunksOfBytes maxBytes string =
         []
 
     else
-        case List.foldl step ( "", 0, [] ) (String.toList string) of
+        case String.foldl step ( "", 0, [] ) string of
             ( "", _, chunks ) ->
                 List.reverse chunks
 
