@@ -2,6 +2,7 @@ module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
     , assetMetadata, empty, file, insertAsset, label, singleton, withFile
+    , fileFromCbor, fileToCbor
     , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
@@ -20,6 +21,8 @@ that transaction.
 
 @docs empty, singleton, insertAsset, assetMetadata, withFile, file, label
 
+@docs fileFromCbor, fileToCbor
+
 @docs stringFromCbor, stringToCbor
 
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
@@ -29,10 +32,11 @@ that transaction.
 
 import Bytes.Comparable exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
-import Cardano.Metadatum exposing (Metadatum)
+import Cardano.Metadatum as Metadatum exposing (Metadatum)
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
 import Cbor.Decode as D
 import Cbor.Encode as E
+import Cbor.Encode.Extra as EE
 import Dict exposing (Dict)
 import Natural exposing (Natural)
 
@@ -169,6 +173,11 @@ type alias File =
 
 
 {-| Create file metadata with optional fields empty.
+
+When encoded to CBOR, entries in `otherProps` with keys `"name"`,
+`"mediaType"`, or `"src"` are ignored. Those fields are always encoded from the
+dedicated record fields.
+
 -}
 file : String -> MimeType -> Uri -> File
 file name mediaType src =
@@ -177,6 +186,81 @@ file name mediaType src =
     , src = src
     , otherProps = Dict.empty
     }
+
+
+{-| Encode CIP-0025 file metadata to CBOR.
+-}
+fileToCbor : File -> E.Encoder
+fileToCbor file_ =
+    let
+        otherProps =
+            file_.otherProps
+                |> Dict.filter (\key _ -> key /= "name" && key /= "mediaType" && key /= "src")
+                |> Dict.toList
+                |> List.map (Tuple.mapSecond Metadatum.toCbor)
+    in
+    EE.associativeList E.string identity <|
+        [ ( "name", stringToCbor file_.name )
+        , ( "mediaType", file_.mediaType |> mimeTypeToString |> stringToCbor )
+        , ( "src", stringToCbor file_.src )
+        ]
+            ++ otherProps
+
+
+{-| Decode CIP-0025 file metadata from CBOR.
+-}
+fileFromCbor : D.Decoder File
+fileFromCbor =
+    let
+        step ( key, raw ) fields =
+            case key of
+                "name" ->
+                    { fields | name = D.decode stringFromCbor raw }
+
+                "mediaType" ->
+                    { fields | mediaType = D.decode stringFromCbor raw |> Maybe.andThen mimeTypeFromString }
+
+                "src" ->
+                    { fields | src = D.decode stringFromCbor raw }
+
+                _ ->
+                    case ( fields.otherProps, D.decode Metadatum.fromCbor raw ) of
+                        ( Just otherProps, Just value ) ->
+                            { fields | otherProps = Just (Dict.insert key value otherProps) }
+
+                        _ ->
+                            { fields | otherProps = Nothing }
+    in
+    D.associativeList D.string D.raw
+        |> D.andThen
+            (\pairs ->
+                let
+                    fields =
+                        List.foldl step
+                            { name = Nothing
+                            , mediaType = Nothing
+                            , src = Nothing
+                            , otherProps = Just Dict.empty
+                            }
+                            pairs
+                in
+                case fields.name of
+                    Just name ->
+                        case ( fields.mediaType, fields.src, fields.otherProps ) of
+                            ( Just mediaType, Just src, Just otherProps ) ->
+                                D.succeed
+                                    { name = name
+                                    , mediaType = mediaType
+                                    , src = src
+                                    , otherProps = otherProps
+                                    }
+
+                            _ ->
+                                D.fail
+
+                    Nothing ->
+                        D.fail
+            )
 
 
 {-| A MIME media type, such as `image/png` or `application/json`.
