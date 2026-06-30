@@ -1,10 +1,8 @@
 module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
-    , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
+    , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri
     , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAssetMetadata, label, singleton, withFile
     , fromCbor, toCbor
-    , assetMetadataFromCbor, assetMetadataToCbor, fileFromCbor, fileToCbor
-    , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -18,15 +16,11 @@ that transaction.
 
 @docs Cip25, PolicyMetadata, AssetMetadata
 
-@docs File, Image, ImageMime, MimeType, Uri, Version
+@docs File, Image, ImageMime, MimeType, Uri
 
 @docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
 @docs fromCbor, toCbor
-
-@docs assetMetadataFromCbor, assetMetadataToCbor, fileFromCbor, fileToCbor
-
-@docs stringFromCbor, stringToCbor
 
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
 @docs mimeTypeFromString, mimeTypeToString
@@ -113,11 +107,33 @@ insertAssetMetadata : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip2
 insertAssetMetadata policyId assetName metadata (Cip25 cip25) =
     if MultiAsset.isValidPolicyId policyId && MultiAsset.isValidAssetName assetName then
         case cip25.version of
-            V1 ->
+            V1Implicit ->
                 if Bytes.toText assetName /= Nothing then
                     Just <|
                         Cip25
-                            { version = V1
+                            { version = V1Implicit
+                            , policies = insertAssetMetadataInPolicyMap policyId assetName metadata cip25.policies
+                            }
+
+                else
+                    Nothing
+
+            V1String version ->
+                if Bytes.toText assetName /= Nothing then
+                    Just <|
+                        Cip25
+                            { version = V1String version
+                            , policies = insertAssetMetadataInPolicyMap policyId assetName metadata cip25.policies
+                            }
+
+                else
+                    Nothing
+
+            V1Int ->
+                if Bytes.toText assetName /= Nothing then
+                    Just <|
+                        Cip25
+                            { version = V1Int
                             , policies = insertAssetMetadataInPolicyMap policyId assetName metadata cip25.policies
                             }
 
@@ -185,23 +201,34 @@ assetMetadata name image =
 -}
 toCbor : Cip25 -> E.Encoder
 toCbor (Cip25 cip25) =
-    case cip25.version of
-        V1 ->
-            EE.associativeList E.string identity <|
-                (cip25.policies
-                    |> BytesMap.toList
-                    |> List.map
-                        (\( policyId, policyMetadata ) ->
-                            ( Bytes.toHex policyId
-                            , policyMetadata
-                                |> BytesMap.toList
-                                |> List.map
-                                    (Tuple.mapFirst v1AssetNameBytesToCbor)
-                                |> EE.associativeList identity assetMetadataToCbor
-                            )
+    let
+        v1PolicyEntries =
+            cip25.policies
+                |> BytesMap.toList
+                |> List.map
+                    (\( policyId, policyMetadata ) ->
+                        ( Bytes.toHex policyId
+                        , policyMetadata
+                            |> BytesMap.toList
+                            |> List.map
+                                (Tuple.mapFirst v1AssetNameBytesToCbor)
+                            |> EE.associativeList identity assetMetadataToCbor
                         )
-                )
-                    ++ [ ( "version", E.int 1 ) ]
+                    )
+
+        v1ToCbor versionEntries =
+            EE.associativeList E.string identity <|
+                v1PolicyEntries ++ versionEntries
+    in
+    case cip25.version of
+        V1Implicit ->
+            v1ToCbor []
+
+        V1String version ->
+            v1ToCbor [ ( "version", E.string version ) ]
+
+        V1Int ->
+            v1ToCbor [ ( "version", E.int 1 ) ]
 
         V2 ->
             EE.associativeList identity identity <|
@@ -225,10 +252,26 @@ fromCbor =
         |> D.andThen
             (\pairs ->
                 case versionFromCborPairs pairs of
-                    Just V1 ->
+                    Just V1Implicit ->
                         case decodeV1Policies (withoutVersion pairs) of
                             Just policies ->
-                                D.succeed (Cip25 { version = V1, policies = policies })
+                                D.succeed (Cip25 { version = V1Implicit, policies = policies })
+
+                            Nothing ->
+                                D.fail
+
+                    Just (V1String version) ->
+                        case decodeV1Policies (withoutVersion pairs) of
+                            Just policies ->
+                                D.succeed (Cip25 { version = V1String version, policies = policies })
+
+                            Nothing ->
+                                D.fail
+
+                    Just V1Int ->
+                        case decodeV1Policies (withoutVersion pairs) of
+                            Just policies ->
+                                D.succeed (Cip25 { version = V1Int, policies = policies })
 
                             Nothing ->
                                 D.fail
@@ -250,21 +293,21 @@ versionFromCborPairs : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe Version
 versionFromCborPairs pairs =
     case List.filter (Tuple.first >> isVersionKey) pairs of
         [] ->
-            Just V1
+            Just V1Implicit
 
         [ ( _, rawVersion ) ] ->
             case ( D.decode D.int rawVersion, D.decode D.string rawVersion ) of
                 ( Just 1, _ ) ->
-                    Just V1
+                    Just V1Int
 
                 ( Just 2, _ ) ->
                     Just V2
 
-                ( _, Just "1.0" ) ->
-                    Just V1
+                ( _, Just "1" ) ->
+                    Just (V1String "1")
 
-                ( _, Just "2.0" ) ->
-                    Just V2
+                ( _, Just "1.0" ) ->
+                    Just (V1String "1.0")
 
                 _ ->
                     Nothing
@@ -553,10 +596,16 @@ type alias Uri =
     String
 
 
-{-| Datatype to represent standard's version.
--}
+-- V1 metadata can appear on-chain with no version field, with an integer
+-- version, or with string versions such as "1" and "1.0". The string variants
+-- are not CIP-25 canonical, but they are slightly dominant on mainnet, so we
+-- accept them for compatibility. Since V1 values are only created by decoding,
+-- the internal version keeps the decoded wire shape so `fromCbor >> toCbor`
+-- can preserve existing payloads.
 type Version
-    = V1
+    = V1Implicit
+    | V1String String
+    | V1Int
     | V2
 
 
