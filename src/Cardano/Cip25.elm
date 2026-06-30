@@ -2,6 +2,7 @@ module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
     , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAssetMetadata, label, singleton, withFile
+    , fromCbor, toCbor
     , assetMetadataFromCbor, assetMetadataToCbor, fileFromCbor, fileToCbor
     , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
@@ -21,6 +22,8 @@ that transaction.
 
 @docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
+@docs fromCbor, toCbor
+
 @docs assetMetadataFromCbor, assetMetadataToCbor, fileFromCbor, fileToCbor
 
 @docs stringFromCbor, stringToCbor
@@ -30,6 +33,7 @@ that transaction.
 
 -}
 
+import Bytes as RawBytes
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum as Metadatum exposing (Metadatum)
@@ -39,6 +43,7 @@ import Cbor.Decode as D
 import Cbor.Encode as E
 import Cbor.Encode.Extra as EE
 import Dict exposing (Dict)
+import Maybe.Extra
 import Natural exposing (Natural)
 
 
@@ -174,6 +179,217 @@ assetMetadata name image =
     , files = []
     , otherProps = Dict.empty
     }
+
+
+{-| Encode the CIP-0025 payload that belongs under metadata label 721.
+-}
+toCbor : Cip25 -> E.Encoder
+toCbor (Cip25 cip25) =
+    case cip25.version of
+        V1 ->
+            EE.associativeList E.string identity <|
+                (cip25.policies
+                    |> BytesMap.toList
+                    |> List.map
+                        (\( policyId, policyMetadata ) ->
+                            ( Bytes.toHex policyId
+                            , policyMetadata
+                                |> BytesMap.toList
+                                |> List.map
+                                    (Tuple.mapFirst v1AssetNameBytesToCbor)
+                                |> EE.associativeList identity assetMetadataToCbor
+                            )
+                        )
+                )
+                    ++ [ ( "version", E.int 1 ) ]
+
+        V2 ->
+            EE.associativeList identity identity <|
+                (cip25.policies
+                    |> BytesMap.toList
+                    |> List.map
+                        (\( policyId, policyMetadata ) ->
+                            ( Bytes.toCbor policyId
+                            , BytesMap.toCbor assetMetadataToCbor policyMetadata
+                            )
+                        )
+                )
+                    ++ [ ( E.string "version", E.int 2 ) ]
+
+
+{-| Decode the CIP-0025 payload from metadata label 721.
+-}
+fromCbor : D.Decoder Cip25
+fromCbor =
+    D.associativeList D.raw D.raw
+        |> D.andThen
+            (\pairs ->
+                case versionFromCborPairs pairs of
+                    Just V1 ->
+                        case decodeV1Policies (withoutVersion pairs) of
+                            Just policies ->
+                                D.succeed (Cip25 { version = V1, policies = policies })
+
+                            Nothing ->
+                                D.fail
+
+                    Just V2 ->
+                        case decodeV2Policies (withoutVersion pairs) of
+                            Just policies ->
+                                D.succeed (Cip25 { version = V2, policies = policies })
+
+                            Nothing ->
+                                D.fail
+
+                    Nothing ->
+                        D.fail
+            )
+
+
+versionFromCborPairs : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe Version
+versionFromCborPairs pairs =
+    case List.filter (Tuple.first >> isVersionKey) pairs of
+        [] ->
+            Just V1
+
+        [ ( _, rawVersion ) ] ->
+            case ( D.decode D.int rawVersion, D.decode D.string rawVersion ) of
+                ( Just 1, _ ) ->
+                    Just V1
+
+                ( Just 2, _ ) ->
+                    Just V2
+
+                ( _, Just "1.0" ) ->
+                    Just V1
+
+                ( _, Just "2.0" ) ->
+                    Just V2
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+withoutVersion : List ( RawBytes.Bytes, RawBytes.Bytes ) -> List ( RawBytes.Bytes, RawBytes.Bytes )
+withoutVersion =
+    List.filter (Tuple.first >> isVersionKey >> not)
+
+
+isVersionKey : RawBytes.Bytes -> Bool
+isVersionKey rawKey =
+    D.decode D.string rawKey == Just "version"
+
+
+decodeV1Policies : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe (BytesMap PolicyId PolicyMetadata)
+decodeV1Policies pairs =
+    Maybe.Extra.combineMap decodeV1Policy pairs
+        |> Maybe.map BytesMap.fromList
+
+
+decodeV1Policy : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes PolicyId, PolicyMetadata )
+decodeV1Policy ( rawPolicyId, rawPolicyMetadata ) =
+    case D.decode D.string rawPolicyId of
+        Just policyIdHex ->
+            case Bytes.fromHex policyIdHex of
+                Just policyId ->
+                    if MultiAsset.isValidPolicyId policyId then
+                        D.decode (D.associativeList D.raw D.raw) rawPolicyMetadata
+                            |> Maybe.andThen
+                                (Maybe.Extra.combineMap decodeV1AssetMetadata
+                                    >> Maybe.map (\assets -> ( policyId, BytesMap.fromList assets ))
+                                )
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    Nothing
+
+        Nothing ->
+            Nothing
+
+
+decodeV1AssetMetadata : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes AssetName, AssetMetadata )
+decodeV1AssetMetadata ( rawAssetName, rawAssetMetadata ) =
+    case D.decode D.string rawAssetName of
+        Just assetNameText ->
+            let
+                assetName =
+                    Bytes.fromText assetNameText
+            in
+            if MultiAsset.isValidAssetName assetName then
+                D.decode assetMetadataFromCbor rawAssetMetadata
+                    |> Maybe.map (\metadata -> ( assetName, metadata ))
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+decodeV2Policies : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe (BytesMap PolicyId PolicyMetadata)
+decodeV2Policies pairs =
+    Maybe.Extra.combineMap decodeV2Policy pairs
+        |> Maybe.map BytesMap.fromList
+
+
+decodeV2Policy : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes PolicyId, PolicyMetadata )
+decodeV2Policy ( rawPolicyId, rawPolicyMetadata ) =
+    case D.decode (D.map Bytes.fromBytes D.bytes) rawPolicyId of
+        Just policyId ->
+            if MultiAsset.isValidPolicyId policyId then
+                D.decode (D.associativeList D.raw D.raw) rawPolicyMetadata
+                    |> Maybe.andThen
+                        (Maybe.Extra.combineMap decodeV2AssetMetadata
+                            >> Maybe.map (\assets -> ( policyId, BytesMap.fromList assets ))
+                        )
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+decodeV2AssetMetadata : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes AssetName, AssetMetadata )
+decodeV2AssetMetadata ( rawAssetName, rawAssetMetadata ) =
+    case D.decode (D.map Bytes.fromBytes D.bytes) rawAssetName of
+        Just assetName ->
+            if MultiAsset.isValidAssetName assetName then
+                D.decode assetMetadataFromCbor rawAssetMetadata
+                    |> Maybe.map (\metadata -> ( assetName, metadata ))
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+-- CIP-25 V1 asset names are CBOR text-string keys, but this module stores
+-- asset names as bytes, and the only way to instantiate V1 CIP-25 values is
+-- through decoding existing CBOR. This encoder emits those bytes as a CBOR
+-- text string, assuming they came from valid UTF-8 text.
+v1AssetNameBytesToCbor : Bytes a -> E.Encoder
+v1AssetNameBytesToCbor bytes =
+    let
+        width =
+            Bytes.width bytes
+
+        header =
+            if width < 24 then
+                Bytes.fromU8 [ 0x60 + width ]
+
+            else
+                Bytes.fromU8 [ 0x78, width ]
+    in
+    Bytes.concat header bytes
+        |> Bytes.toBytes
+        |> E.raw
 
 
 {-| Encode CIP-0025 asset metadata to CBOR.
@@ -356,18 +572,24 @@ type alias File =
 
 {-| Create file metadata with optional fields empty.
 
+Returns `Nothing` if the MIME type string is invalid.
+
 When encoded to CBOR, entries in `otherProps` with keys `"name"`,
 `"mediaType"`, or `"src"` are ignored. Those fields are always encoded from the
 dedicated record fields.
 
 -}
-file : String -> MimeType -> Uri -> File
+file : String -> String -> Uri -> Maybe File
 file name mediaType src =
-    { name = name
-    , mediaType = mediaType
-    , src = src
-    , otherProps = Dict.empty
-    }
+    mimeTypeFromString mediaType
+        |> Maybe.map
+            (\validMediaType ->
+                { name = name
+                , mediaType = validMediaType
+                , src = src
+                , otherProps = Dict.empty
+                }
+            )
 
 
 {-| Encode CIP-0025 file metadata to CBOR.
