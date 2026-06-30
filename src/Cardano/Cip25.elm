@@ -1,7 +1,7 @@
 module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
-    , assetMetadata, file, insertAsset, label, singleton, withFile
+    , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAsset, label, singleton, withFile
     , fileFromCbor, fileToCbor
     , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
@@ -19,7 +19,7 @@ that transaction.
 
 @docs File, Image, ImageMime, MimeType, Uri, Version
 
-@docs singleton, insertAsset, assetMetadata, withFile, file, label
+@docs singleton, insertAsset, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
 @docs fileFromCbor, fileToCbor
 
@@ -145,6 +145,22 @@ insertAssetInPolicyMap policyId assetName metadata policies =
                 |> Just
         )
         policies
+
+
+{-| Get all asset metadata grouped by policy ID.
+-}
+getAllMetadata : Cip25 -> BytesMap PolicyId PolicyMetadata
+getAllMetadata (Cip25 cip25) =
+    cip25.policies
+
+
+{-| Get metadata for one asset.
+-}
+getAssetMetadata : Bytes PolicyId -> Bytes AssetName -> Cip25 -> Maybe AssetMetadata
+getAssetMetadata policyId assetName (Cip25 cip25) =
+    cip25.policies
+        |> BytesMap.get policyId
+        |> Maybe.andThen (BytesMap.get assetName)
 
 
 {-| Create asset metadata with optional fields empty.
