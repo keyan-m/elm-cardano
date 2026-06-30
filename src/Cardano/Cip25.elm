@@ -1,7 +1,7 @@
 module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
-    , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAsset, label, singleton, withFile
+    , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAssetMetadata, label, singleton, withFile
     , fileFromCbor, fileToCbor
     , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
@@ -19,7 +19,7 @@ that transaction.
 
 @docs File, Image, ImageMime, MimeType, Uri, Version
 
-@docs singleton, insertAsset, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
+@docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
 @docs fileFromCbor, fileToCbor
 
@@ -91,7 +91,7 @@ policy ID is exactly 28 bytes and the asset name is at most 32 bytes.
 -}
 singleton : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Maybe Cip25
 singleton policyId assetName metadata =
-    insertAsset policyId assetName metadata <|
+    insertAssetMetadata policyId assetName metadata <|
         Cip25
             { version = V2
             , policies = BytesMap.empty
@@ -104,8 +104,8 @@ Returns `Nothing` for invalid policy IDs, invalid asset names, or non-UTF-8
 asset names in version 1 metadata.
 
 -}
-insertAsset : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25 -> Maybe Cip25
-insertAsset policyId assetName metadata (Cip25 cip25) =
+insertAssetMetadata : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25 -> Maybe Cip25
+insertAssetMetadata policyId assetName metadata (Cip25 cip25) =
     if MultiAsset.isValidPolicyId policyId && MultiAsset.isValidAssetName assetName then
         case cip25.version of
             V1 ->
@@ -113,7 +113,7 @@ insertAsset policyId assetName metadata (Cip25 cip25) =
                     Just <|
                         Cip25
                             { version = V1
-                            , policies = insertAssetInPolicyMap policyId assetName metadata cip25.policies
+                            , policies = insertAssetMetadataInPolicyMap policyId assetName metadata cip25.policies
                             }
 
                 else
@@ -123,20 +123,20 @@ insertAsset policyId assetName metadata (Cip25 cip25) =
                 Just <|
                     Cip25
                         { version = V2
-                        , policies = insertAssetInPolicyMap policyId assetName metadata cip25.policies
+                        , policies = insertAssetMetadataInPolicyMap policyId assetName metadata cip25.policies
                         }
 
     else
         Nothing
 
 
-insertAssetInPolicyMap :
+insertAssetMetadataInPolicyMap :
     Bytes PolicyId
     -> Bytes AssetName
     -> AssetMetadata
     -> BytesMap PolicyId PolicyMetadata
     -> BytesMap PolicyId PolicyMetadata
-insertAssetInPolicyMap policyId assetName metadata policies =
+insertAssetMetadataInPolicyMap policyId assetName metadata policies =
     BytesMap.update policyId
         (\maybePolicyMetadata ->
             maybePolicyMetadata
