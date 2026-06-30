@@ -42,4 +42,32 @@ suite =
                             |> E.encode
                             |> D.decode Cip25.fileFromCbor
                             |> Expect.equal (Just file)
+        , test "asset metadata round trips through CBOR" <|
+            \_ ->
+                case ( Cip25.imageMimeFromString "image/png", Cip25.mimeTypeFromString "application/json" ) of
+                    ( Just imageMime, Just fileMime ) ->
+                        let
+                            assetMetadata =
+                                { name = String.repeat 40 "é"
+                                , image = Cip25.Image "ipfs://image"
+                                , mediaType = Just imageMime
+                                , description = Just "description"
+                                , files =
+                                    [ { name = "manifest"
+                                      , mediaType = fileMime
+                                      , src = "ipfs://manifest"
+                                      , otherProps = Dict.singleton "sha256" (Metadatum.String "abc123")
+                                      }
+                                    ]
+                                , otherProps = Dict.singleton "rarity" (Metadatum.String "common")
+                                }
+                        in
+                        assetMetadata
+                            |> Cip25.assetMetadataToCbor
+                            |> E.encode
+                            |> D.decode Cip25.assetMetadataFromCbor
+                            |> Expect.equal (Just assetMetadata)
+
+                    _ ->
+                        Expect.fail "Expected MIME types to be valid"
         ]

@@ -2,7 +2,7 @@ module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
     , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAssetMetadata, label, singleton, withFile
-    , fileFromCbor, fileToCbor
+    , assetMetadataFromCbor, assetMetadataToCbor, fileFromCbor, fileToCbor
     , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
@@ -21,7 +21,7 @@ that transaction.
 
 @docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
-@docs fileFromCbor, fileToCbor
+@docs assetMetadataFromCbor, assetMetadataToCbor, fileFromCbor, fileToCbor
 
 @docs stringFromCbor, stringToCbor
 
@@ -174,6 +174,141 @@ assetMetadata name image =
     , files = []
     , otherProps = Dict.empty
     }
+
+
+{-| Encode CIP-0025 asset metadata to CBOR.
+-}
+assetMetadataToCbor : AssetMetadata -> E.Encoder
+assetMetadataToCbor metadata =
+    let
+        otherProps =
+            metadata.otherProps
+                |> Dict.filter
+                    (\key _ ->
+                        not (List.member key [ "name", "image", "mediaType", "description", "files" ])
+                    )
+                |> Dict.toList
+                |> List.map (Tuple.mapSecond Metadatum.toCbor)
+
+        optionalMediaType =
+            metadata.mediaType
+                |> Maybe.map (\mediaType -> ( "mediaType", mediaType |> imageMimeToString |> stringToCbor ))
+                |> Maybe.map List.singleton
+                |> Maybe.withDefault []
+
+        optionalDescription =
+            metadata.description
+                |> Maybe.map (\description -> ( "description", stringToCbor description ))
+                |> Maybe.map List.singleton
+                |> Maybe.withDefault []
+
+        optionalFiles =
+            if List.isEmpty metadata.files then
+                []
+
+            else
+                [ ( "files", E.list fileToCbor metadata.files ) ]
+    in
+    EE.associativeList E.string identity <|
+        [ ( "name", stringToCbor metadata.name )
+        , ( "image", imageToUri metadata.image |> stringToCbor )
+        ]
+            ++ optionalMediaType
+            ++ optionalDescription
+            ++ optionalFiles
+            ++ otherProps
+
+
+imageToUri : Image -> Uri
+imageToUri (Image uri) =
+    uri
+
+
+{-| Decode CIP-0025 asset metadata from CBOR.
+-}
+assetMetadataFromCbor : D.Decoder AssetMetadata
+assetMetadataFromCbor =
+    let
+        step ( key, raw ) fields =
+            case key of
+                "name" ->
+                    case D.decode stringFromCbor raw of
+                        Just name ->
+                            { fields | name = Just name }
+
+                        Nothing ->
+                            { fields | invalid = True }
+
+                "image" ->
+                    case D.decode stringFromCbor raw of
+                        Just image ->
+                            { fields | image = Just (Image image) }
+
+                        Nothing ->
+                            { fields | invalid = True }
+
+                "mediaType" ->
+                    case D.decode stringFromCbor raw |> Maybe.andThen imageMimeFromString of
+                        Just mediaType ->
+                            { fields | mediaType = Just mediaType }
+
+                        Nothing ->
+                            { fields | invalid = True }
+
+                "description" ->
+                    case D.decode stringFromCbor raw of
+                        Just description ->
+                            { fields | description = Just description }
+
+                        Nothing ->
+                            { fields | invalid = True }
+
+                "files" ->
+                    case D.decode (D.list fileFromCbor) raw of
+                        Just files ->
+                            { fields | files = files }
+
+                        Nothing ->
+                            { fields | invalid = True }
+
+                _ ->
+                    case D.decode Metadatum.fromCbor raw of
+                        Just value ->
+                            { fields | otherProps = Dict.insert key value fields.otherProps }
+
+                        Nothing ->
+                            { fields | invalid = True }
+    in
+    D.associativeList D.string D.raw
+        |> D.andThen
+            (\pairs ->
+                let
+                    fields =
+                        List.foldl step
+                            { name = Nothing
+                            , image = Nothing
+                            , mediaType = Nothing
+                            , description = Nothing
+                            , files = []
+                            , otherProps = Dict.empty
+                            , invalid = False
+                            }
+                            pairs
+                in
+                case ( fields.invalid, fields.name, fields.image ) of
+                    ( False, Just name, Just image ) ->
+                        D.succeed
+                            { name = name
+                            , image = image
+                            , mediaType = fields.mediaType
+                            , description = fields.description
+                            , files = fields.files
+                            , otherProps = fields.otherProps
+                            }
+
+                    _ ->
+                        D.fail
+            )
 
 
 {-| Add a file to asset metadata.
