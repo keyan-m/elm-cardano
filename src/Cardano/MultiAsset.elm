@@ -1,6 +1,7 @@
 module Cardano.MultiAsset exposing
     ( MultiAsset, PolicyId, AssetName
     , isEmpty, get, set, empty, onlyToken, normalize, mintAdd
+    , isValidPolicyId, isValidAssetName
     , balance, map, map2, split
     , coinsToCbor, mintToCbor, coinsFromCbor, mintFromCbor
     , toData
@@ -11,6 +12,7 @@ module Cardano.MultiAsset exposing
 
 @docs MultiAsset, PolicyId, AssetName
 @docs isEmpty, get, set, empty, onlyToken, normalize, mintAdd
+@docs isValidPolicyId, isValidAssetName
 @docs balance, map, map2, split
 @docs coinsToCbor, mintToCbor, coinsFromCbor, mintFromCbor
 @docs toData
@@ -55,6 +57,20 @@ This is a free-form bytes array of length <= 32 bytes.
 -}
 type AssetName
     = AssetName Never
+
+
+{-| Check whether bytes have the ledger policy ID length.
+-}
+isValidPolicyId : Bytes PolicyId -> Bool
+isValidPolicyId policyId =
+    Bytes.width policyId == 28
+
+
+{-| Check whether bytes fit within the ledger asset-name length limit.
+-}
+isValidAssetName : Bytes AssetName -> Bool
+isValidAssetName assetName =
+    Bytes.width assetName <= 32
 
 
 {-| Check if the [MultiAsset] contains no token.

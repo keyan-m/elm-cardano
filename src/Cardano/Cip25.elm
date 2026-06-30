@@ -1,7 +1,7 @@
 module Cardano.Cip25 exposing
     ( AssetMetadata, Cip25
     , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri, Version(..)
-    , assetMetadata, empty, file, insertAsset, label, singleton, withFile
+    , assetMetadata, file, insertAsset, label, singleton, withFile
     , fileFromCbor, fileToCbor
     , stringFromCbor, stringToCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
@@ -19,7 +19,7 @@ that transaction.
 
 @docs File, Image, ImageMime, MimeType, Uri, Version
 
-@docs empty, singleton, insertAsset, assetMetadata, withFile, file, label
+@docs singleton, insertAsset, assetMetadata, withFile, file, label
 
 @docs fileFromCbor, fileToCbor
 
@@ -30,9 +30,10 @@ that transaction.
 
 -}
 
-import Bytes.Comparable exposing (Bytes)
+import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum as Metadatum exposing (Metadatum)
+import Cardano.MultiAsset as MultiAsset
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
 import Cbor.Decode as D
 import Cbor.Encode as E
@@ -47,10 +48,11 @@ CIP-0025 metadata is grouped by policy ID, then by asset name. The `version`
 field applies to the whole label-721 payload, not to each asset.
 
 -}
-type alias Cip25 =
-    { version : Version
-    , policies : BytesMap PolicyId PolicyMetadata
-    }
+type Cip25
+    = Cip25
+        { version : Version
+        , policies : BytesMap PolicyId PolicyMetadata
+        }
 
 
 {-| Metadata for all assets under one policy ID.
@@ -81,39 +83,68 @@ label =
     Natural.fromSafeInt 721
 
 
-{-| Create empty CIP-0025 metadata for a version.
--}
-empty : Version -> Cip25
-empty version =
-    { version = version
-    , policies = BytesMap.empty
-    }
-
-
 {-| Create CIP-0025 metadata for one asset.
+
+Smart constructors create version 2 metadata. Returns `Nothing` unless the
+policy ID is exactly 28 bytes and the asset name is at most 32 bytes.
+
 -}
-singleton : Version -> Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25
-singleton version policyId assetName metadata =
-    { version = version
-    , policies = BytesMap.singleton policyId (BytesMap.singleton assetName metadata)
-    }
+singleton : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Maybe Cip25
+singleton policyId assetName metadata =
+    insertAsset policyId assetName metadata <|
+        Cip25
+            { version = V2
+            , policies = BytesMap.empty
+            }
 
 
 {-| Insert or replace one asset's metadata.
+
+Returns `Nothing` for invalid policy IDs, invalid asset names, or non-UTF-8
+asset names in version 1 metadata.
+
 -}
-insertAsset : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25 -> Cip25
-insertAsset policyId assetName metadata cip25 =
-    { cip25
-        | policies =
-            BytesMap.update policyId
-                (\maybePolicyMetadata ->
-                    maybePolicyMetadata
-                        |> Maybe.withDefault BytesMap.empty
-                        |> BytesMap.insert assetName metadata
-                        |> Just
-                )
-                cip25.policies
-    }
+insertAsset : Bytes PolicyId -> Bytes AssetName -> AssetMetadata -> Cip25 -> Maybe Cip25
+insertAsset policyId assetName metadata (Cip25 cip25) =
+    if MultiAsset.isValidPolicyId policyId && MultiAsset.isValidAssetName assetName then
+        case cip25.version of
+            V1 ->
+                if Bytes.toText assetName /= Nothing then
+                    Just <|
+                        Cip25
+                            { version = V1
+                            , policies = insertAssetInPolicyMap policyId assetName metadata cip25.policies
+                            }
+
+                else
+                    Nothing
+
+            V2 ->
+                Just <|
+                    Cip25
+                        { version = V2
+                        , policies = insertAssetInPolicyMap policyId assetName metadata cip25.policies
+                        }
+
+    else
+        Nothing
+
+
+insertAssetInPolicyMap :
+    Bytes PolicyId
+    -> Bytes AssetName
+    -> AssetMetadata
+    -> BytesMap PolicyId PolicyMetadata
+    -> BytesMap PolicyId PolicyMetadata
+insertAssetInPolicyMap policyId assetName metadata policies =
+    BytesMap.update policyId
+        (\maybePolicyMetadata ->
+            maybePolicyMetadata
+                |> Maybe.withDefault BytesMap.empty
+                |> BytesMap.insert assetName metadata
+                |> Just
+        )
+        policies
 
 
 {-| Create asset metadata with optional fields empty.
