@@ -53,6 +53,27 @@ type alias Cip25 =
     }
 
 
+{-| Metadata for all assets under one policy ID.
+-}
+type alias PolicyMetadata =
+    BytesMap AssetName AssetMetadata
+
+
+{-| Metadata for a single asset.
+
+The standard simply lays out a set of fields, some of which are optional.
+
+-}
+type alias AssetMetadata =
+    { name : String
+    , image : Image
+    , mediaType : Maybe ImageMime
+    , description : Maybe String
+    , files : List File
+    , otherProps : Dict String Metadatum
+    }
+
+
 {-| CIP-0025 metadata label.
 -}
 label : Natural
@@ -92,27 +113,6 @@ insertAsset policyId assetName metadata cip25 =
                         |> Just
                 )
                 cip25.policies
-    }
-
-
-{-| Metadata for all assets under one policy ID.
--}
-type alias PolicyMetadata =
-    BytesMap AssetName AssetMetadata
-
-
-{-| Metadata for a single asset.
-
-The standard simply lays out a set of fields, some of which are optional.
-
--}
-type alias AssetMetadata =
-    { name : String
-    , image : Image
-    , mediaType : Maybe ImageMime
-    , description : Maybe String
-    , files : List File
-    , otherProps : Dict String Metadatum
     }
 
 
