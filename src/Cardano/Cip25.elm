@@ -1,6 +1,6 @@
 module Cardano.Cip25 exposing
     ( Cip25, PolicyMetadata, AssetMetadata
-    , File, Image(..), ImageMime, MimeType, Uri
+    , File, ImageMime, MimeType, Uri
     , singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
     , fromCbor, toCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
@@ -16,7 +16,7 @@ that transaction.
 
 @docs Cip25, PolicyMetadata, AssetMetadata
 
-@docs File, Image, ImageMime, MimeType, Uri
+@docs File, ImageMime, MimeType, Uri
 
 @docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
@@ -62,29 +62,21 @@ type alias PolicyMetadata =
 {-| Metadata for a single asset.
 
 The standard simply lays out a set of fields, some of which are optional.
-
--}
-type alias AssetMetadata =
-    { name : String
-    , image : Image
-    , mediaType : Maybe ImageMime
-    , description : Maybe String
-    , files : List File
-    , otherProps : Dict String Metadatum
-    }
-
-
-{-| Helper datatype for the `image` field of CIP-0025.
-
-The image is a URI that points to a resource with MIME type `image/*`.
+The `image` field is a URI that points to a resource with MIME type `image/*`.
 Inline images are represented as `data:` URIs.
 
 TODO: A structured URI model is probably a better design here, so callers can
 inspect URI parts before deciding whether to fetch or render an image.
 
 -}
-type Image
-    = Image Uri
+type alias AssetMetadata =
+    { name : String
+    , image : Uri
+    , mediaType : Maybe ImageMime
+    , description : Maybe String
+    , files : List File
+    , otherProps : Dict String Metadatum
+    }
 
 
 {-| Raw URI string.
@@ -251,7 +243,7 @@ getAssetMetadata policyId assetName (Cip25 cip25) =
 
 {-| Create asset metadata with optional fields empty.
 -}
-assetMetadata : String -> Image -> AssetMetadata
+assetMetadata : String -> Uri -> AssetMetadata
 assetMetadata name image =
     { name = name
     , image = image
@@ -540,17 +532,12 @@ assetMetadataToCbor metadata =
     in
     EE.associativeList E.string identity <|
         [ ( "name", stringToCbor metadata.name )
-        , ( "image", imageToUri metadata.image |> stringToCbor )
+        , ( "image", stringToCbor metadata.image )
         ]
             ++ optionalMediaType
             ++ optionalDescription
             ++ optionalFiles
             ++ otherProps
-
-
-imageToUri : Image -> Uri
-imageToUri (Image uri) =
-    uri
 
 
 {-| Decode CIP-0025 asset metadata from CBOR.
@@ -571,7 +558,7 @@ assetMetadataFromCbor =
                 "image" ->
                     case D.decode stringFromCbor raw of
                         Just image ->
-                            { fields | image = Just (Image image) }
+                            { fields | image = Just image }
 
                         Nothing ->
                             { fields | invalid = True }

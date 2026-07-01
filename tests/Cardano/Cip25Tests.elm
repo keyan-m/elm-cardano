@@ -41,7 +41,7 @@ suite =
 
         tappyAssetMetadata =
             { name = "Tappys"
-            , image = Cip25.Image "ipfs://QmWdfHagFAN8KE37gPgfC7JHY9pAnnmNsQ7V818qbqcT3z"
+            , image = "ipfs://QmWdfHagFAN8KE37gPgfC7JHY9pAnnmNsQ7V818qbqcT3z"
             , mediaType = Nothing
             , description = Just "TapTools Memecoin has Finally Arrived! NFA. Memes are Risky"
             , files = []
@@ -98,7 +98,7 @@ suite =
 
                             assetMetadata =
                                 { name = String.repeat 40 "é"
-                                , image = Cip25.Image "ipfs://image"
+                                , image = "ipfs://image"
                                 , mediaType = Just imageMime
                                 , description = Just (String.repeat 40 "é")
                                 , files = [ { file | otherProps = Dict.singleton "sha256" (Metadatum.String "abc123") } ]
@@ -137,7 +137,7 @@ suite =
 
                             assetMetadata =
                                 { name = "A"
-                                , image = Cip25.Image "ipfs://x"
+                                , image = "ipfs://x"
                                 , mediaType = Just imageMime
                                 , description = Just "description"
                                 , files = [ fileWithReservedProps ]
@@ -204,7 +204,7 @@ suite =
                             [ \_ ->
                                 cip25
                                     |> Cip25.getAssetMetadata validPolicyId validAssetName
-                                    |> Expect.equal (Just (Cip25.assetMetadata "A" (Cip25.Image "ipfs://x")))
+                                    |> Expect.equal (Just (Cip25.assetMetadata "A" "ipfs://x"))
                             , \_ ->
                                 cip25
                                     |> Cip25.toCbor
@@ -374,7 +374,7 @@ suite =
 
                             expected =
                                 { name = "SHARL HUSKENSAN"
-                                , image = Cip25.Image "ipfs://QmetLQaD5vvrsXC8xNhPsAfU3Rx9z1rAPZZLivoPqVwSrq"
+                                , image = "ipfs://QmetLQaD5vvrsXC8xNhPsAfU3Rx9z1rAPZZLivoPqVwSrq"
                                 , mediaType = Cip25.imageMimeFromString "image/png"
                                 , description = Just "Cardonzo Founder"
                                 , files =
