@@ -1,7 +1,7 @@
 module Cardano.Cip25 exposing
-    ( AssetMetadata, Cip25
-    , File, Image(..), ImageMime, MimeType, PolicyMetadata, Uri
-    , assetMetadata, file, getAllMetadata, getAssetMetadata, insertAssetMetadata, label, singleton, withFile
+    ( Cip25, PolicyMetadata, AssetMetadata
+    , File, Image(..), ImageMime, MimeType, Uri
+    , singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
     , fromCbor, toCbor
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
@@ -31,8 +31,7 @@ import Bytes as RawBytes
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum as Metadatum exposing (Metadatum)
-import Cardano.MultiAsset as MultiAsset
-import Cardano.MultiAsset exposing (AssetName, PolicyId)
+import Cardano.MultiAsset as MultiAsset exposing (AssetName, PolicyId)
 import Cbor.Decode as D
 import Cbor.Encode as E
 import Cbor.Encode.Extra as EE
@@ -71,6 +70,72 @@ type alias AssetMetadata =
     , mediaType : Maybe ImageMime
     , description : Maybe String
     , files : List File
+    , otherProps : Dict String Metadatum
+    }
+
+
+{-| Helper datatype for the `image` field of CIP-0025.
+
+The image is a URI that points to a resource with MIME type `image/*`.
+Inline images are represented as `data:` URIs.
+
+TODO: A structured URI model is probably a better design here, so callers can
+inspect URI parts before deciding whether to fetch or render an image.
+
+-}
+type Image
+    = Image Uri
+
+
+{-| Raw URI string.
+-}
+type alias Uri =
+    String
+
+
+{-| A MIME media type, such as `image/png` or `application/json`.
+
+The constructor is intentionally opaque so this type can represent future IANA
+registrations without hard-coding today's registry into the package.
+
+-}
+type MimeType
+    = MimeType String
+
+
+{-| A MIME media type constrained to the `image/*` top-level type.
+
+The constructor is intentionally opaque for the same reason as [MimeType]:
+image subtypes can be added to the IANA registry over time.
+
+-}
+type ImageMime
+    = ImageMime String
+
+
+{-| Opaque datatype to flag CIP-25 version.
+
+V1 metadata can appear on-chain with no version field, with an integer
+version, or with string versions such as "1" and "1.0". The string variants are
+not CIP-25 canonical, but they are slightly dominant on mainnet, so we accept
+them for compatibility. Since V1 values are only created by decoding, the
+internal version keeps the decoded wire shape so `fromCbor >> toCbor` can
+preserve existing payloads.
+
+-}
+type Version
+    = V1Implicit
+    | V1String String
+    | V1Int
+    | V2
+
+
+{-| Datatype to represent optional files specified for an asset.
+-}
+type alias File =
+    { name : String
+    , mediaType : MimeType
+    , src : Uri
     , otherProps : Dict String Metadatum
     }
 
@@ -218,7 +283,8 @@ toCbor (Cip25 cip25) =
 
         v1ToCbor versionEntries =
             EE.associativeList E.string identity <|
-                v1PolicyEntries ++ versionEntries
+                v1PolicyEntries
+                    ++ versionEntries
     in
     case cip25.version of
         V1Implicit ->
@@ -413,10 +479,14 @@ decodeV2AssetMetadata ( rawAssetName, rawAssetMetadata ) =
             Nothing
 
 
--- CIP-25 V1 asset names are CBOR text-string keys, but this module stores
--- asset names as bytes, and the only way to instantiate V1 CIP-25 values is
--- through decoding existing CBOR. This encoder emits those bytes as a CBOR
--- text string, assuming they came from valid UTF-8 text.
+{-| Unsafe text-string encoding of bytes.
+
+CIP-25 V1 asset names are CBOR text-string keys, but this module stores asset
+names as bytes, and the only way to instantiate V1 CIP-25 values is through
+decoding existing CBOR. This encoder emits those bytes as a CBOR text string,
+assuming they came from valid UTF-8 text.
+
+-}
 v1AssetNameBytesToCbor : Bytes a -> E.Encoder
 v1AssetNameBytesToCbor bytes =
     let
@@ -577,48 +647,6 @@ withFile file_ metadata =
     { metadata | files = metadata.files ++ [ file_ ] }
 
 
-{-| Helper datatype for the `image` field of CIP-0025.
-
-The image is a URI that points to a resource with MIME type `image/*`.
-Inline images are represented as `data:` URIs.
-
-TODO: A structured URI model is probably a better design here, so callers can
-inspect URI parts before deciding whether to fetch or render an image.
-
--}
-type Image
-    = Image Uri
-
-
-{-| Raw URI string.
--}
-type alias Uri =
-    String
-
-
--- V1 metadata can appear on-chain with no version field, with an integer
--- version, or with string versions such as "1" and "1.0". The string variants
--- are not CIP-25 canonical, but they are slightly dominant on mainnet, so we
--- accept them for compatibility. Since V1 values are only created by decoding,
--- the internal version keeps the decoded wire shape so `fromCbor >> toCbor`
--- can preserve existing payloads.
-type Version
-    = V1Implicit
-    | V1String String
-    | V1Int
-    | V2
-
-
-{-| Datatype to represent optional files specified for an asset.
--}
-type alias File =
-    { name : String
-    , mediaType : MimeType
-    , src : Uri
-    , otherProps : Dict String Metadatum
-    }
-
-
 {-| Create file metadata with optional fields empty.
 
 Returns `Nothing` if the MIME type string is invalid.
@@ -716,16 +744,6 @@ fileFromCbor =
             )
 
 
-{-| A MIME media type, such as `image/png` or `application/json`.
-
-The constructor is intentionally opaque so this type can represent future IANA
-registrations without hard-coding today's registry into the package.
-
--}
-type MimeType
-    = MimeType String
-
-
 {-| Build a MIME media type from a full `type/subtype` string.
 
 This validates the two name components and stores the media type in lowercase.
@@ -790,16 +808,6 @@ isValidMimeTypeName name =
                                 || (char == '+')
                         )
                         rest
-
-
-{-| A MIME media type constrained to the `image/*` top-level type.
-
-The constructor is intentionally opaque for the same reason as [MimeType]:
-image subtypes can be added to the IANA registry over time.
-
--}
-type ImageMime
-    = ImageMime String
 
 
 {-| Build an image MIME media type from a full `image/subtype` string.
