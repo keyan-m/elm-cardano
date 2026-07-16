@@ -697,7 +697,7 @@ prettyProtocolParamUpdate update =
         , Maybe.map (\v -> "GovernanceActionDeposit: " ++ Natural.toString v) update.governanceActionDeposit
         , Maybe.map (\v -> "DrepDeposit: " ++ Natural.toString v) update.drepDeposit
         , Maybe.map (\v -> "DrepInactivityPeriod: " ++ Natural.toString v) update.drepInactivityPeriod
-        , Maybe.map (\v -> "MinFeeRefScriptCostPerByte: " ++ String.fromInt v) update.minFeeRefScriptCostPerByte
+        , Maybe.map (\v -> "MinFeeRefScriptCostPerByte: " ++ prettyRational v) update.minFeeRefScriptCostPerByte
         ]
 
 

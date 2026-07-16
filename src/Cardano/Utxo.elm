@@ -4,7 +4,7 @@ module Cardano.Utxo exposing
     , fromLovelace, simpleOutput
     , refAsString
     , lovelace, totalLovelace, compareLovelace, isAdaOnly, isAssetsOnly
-    , minAda, checkMinAda, withMinAda, minAdaForAssets, freeAda, bytesWidth
+    , minAda, minAdaWith, checkMinAda, checkMinAdaWith, withMinAda, minAdaForAssets, freeAda, bytesWidth
     , encodeOutputReference, encodeOutput, encodeDatumOption
     , decodeOutputReference, decodeOutput
     , outputReferenceToData, datumValueFromData
@@ -41,7 +41,7 @@ module Cardano.Utxo exposing
 
 ## Compute
 
-@docs minAda, checkMinAda, withMinAda, minAdaForAssets, freeAda, bytesWidth
+@docs minAda, minAdaWith, checkMinAda, checkMinAdaWith, withMinAda, minAdaForAssets, freeAda, bytesWidth
 
 
 ## Convert
@@ -230,40 +230,57 @@ freeAda output =
     N.sub output.amount.lovelace <| minAda output
 
 
-{-| Compute minimum Ada lovelace for a given [Output].
-
-Since the size of the lovelace field may impact minAda,
-we adjust its value to something 32bits,
-before adjusting again if it becomes >= 2^32.
-
-The formula is given by CIP 55,
-with current value of `4310` for `coinsPerUTxOByte`.
-
-TODO: provide `coinsPerUTxOByte` in function arguments?
-
+{-| Compute minimum Ada lovelace for a given [Output], using the static default
+of `4310` lovelace per UTxO byte.
 -}
 minAda : Output -> Natural
-minAda ({ amount } as output) =
+minAda =
+    minAdaWith (N.fromSafeInt 4310)
+
+
+{-| Compute minimum Ada lovelace for a given [Output], using the supplied
+lovelace-per-UTxO-byte protocol parameter.
+
+The serialized width of the lovelace amount is itself part of the calculation,
+so this converges on a value whose CBOR width agrees with the computed minimum.
+
+-}
+minAdaWith : Natural -> Output -> Natural
+minAdaWith adaPerUtxoByte ({ amount } as output) =
     let
-        -- Make sure lovelace is encoded with exactly 32 bits (so >= 2^16).
-        -- Because 2^16 would correspond to 0.065 min Ada,
-        -- which is not currently possible (famous last words).
-        updatedOutput =
-            { output | amount = { amount | lovelace = N.fromSafeInt <| 2 ^ 16 } }
+        converge candidate =
+            let
+                updatedOutput =
+                    { output | amount = { amount | lovelace = candidate } }
+
+                required =
+                    N.mul adaPerUtxoByte (N.fromSafeInt (160 + bytesWidth updatedOutput))
+            in
+            if required == candidate then
+                required
+
+            else
+                converge required
     in
-    -- minAda is not going to overflow 32 bits,
-    -- because it would mean that its over 4294 min ada.
-    -- It’s not currently possible, and unlikely to increase that much in the future.
-    N.fromSafeInt ((160 + bytesWidth updatedOutput) * 4310)
+    converge N.zero
 
 
-{-| Check that an [Output] has enough ada to cover its size.
+{-| Check that an [Output] has enough ada to cover its size, using the static
+default of `4310` lovelace per UTxO byte.
 -}
 checkMinAda : Output -> Result String Output
-checkMinAda output =
+checkMinAda =
+    checkMinAdaWith (N.fromSafeInt 4310)
+
+
+{-| Check that an [Output] has enough ada to cover its size, using the supplied
+lovelace-per-UTxO-byte protocol parameter.
+-}
+checkMinAdaWith : Natural -> Output -> Result String Output
+checkMinAdaWith adaPerUtxoByte output =
     let
         outputMinAda =
-            minAda output
+            minAdaWith adaPerUtxoByte output
     in
     if lovelace output |> N.isGreaterThanOrEqual outputMinAda then
         Ok output

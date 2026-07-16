@@ -1,8 +1,10 @@
 module Cardano.TxIntent exposing
-    ( balance, finalize, finalizeAdvanced, TxFinalized, TxFinalizationError(..), errorToString
+    ( balance, finalize, finalizeWithProtocolParameters, finalizeAdvanced, finalizeAdvancedWithProtocolParameters
+    , TxFinalized, TxFinalizationError(..), ProtocolRuleError(..), errorToString
     , TxIntent(..), SpendSource(..)
-    , CertificateIntent(..)
+    , CertificateIntent(..), registerStakeWithProtocolDeposit, registerDrepWithProtocolDeposit, registerNewPool, updatePool
     , VoteIntent, ProposalIntent, ActionProposal(..)
+    , proposalWithProtocolDeposit
     , TxOtherInfo(..)
     , Fee(..)
     , GovernanceState, emptyGovernanceState
@@ -40,10 +42,12 @@ and finally trying to validate it and auto-populate all requirements.
 
 # Code Documentation
 
-@docs balance, finalize, finalizeAdvanced, TxFinalized, TxFinalizationError, errorToString
+@docs balance, finalize, finalizeWithProtocolParameters, finalizeAdvanced, finalizeAdvancedWithProtocolParameters
+@docs TxFinalized, TxFinalizationError, ProtocolRuleError, errorToString
 @docs TxIntent, SpendSource
-@docs CertificateIntent
+@docs CertificateIntent, registerStakeWithProtocolDeposit, registerDrepWithProtocolDeposit, registerNewPool, updatePool
 @docs VoteIntent, ProposalIntent, ActionProposal
+@docs proposalWithProtocolDeposit
 @docs TxOtherInfo
 @docs Fee
 @docs GovernanceState, emptyGovernanceState
@@ -62,6 +66,7 @@ import Cardano.Gov as Gov exposing (Action, ActionId, Anchor, Constitution, Cost
 import Cardano.Metadatum exposing (Metadatum)
 import Cardano.MultiAsset as MultiAsset exposing (AssetName, MultiAsset, PolicyId)
 import Cardano.Pool as Pool
+import Cardano.ProtocolParameters as ProtocolParameters exposing (ProtocolParameters)
 import Cardano.Redeemer as Redeemer exposing (Redeemer, RedeemerTag)
 import Cardano.Script as Script exposing (NativeScript, PlutusVersion(..), ScriptCbor)
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction, TransactionBody, VKeyWitness, WitnessSet)
@@ -71,6 +76,7 @@ import Cardano.Utils exposing (UnitInterval)
 import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
+import Cbor.Encode as E
 import Dict.Any exposing (AnyDict)
 import Integer exposing (Integer)
 import List.Extra
@@ -147,6 +153,44 @@ type CertificateIntent
     | DelegateVotes { delegator : Witness.Credential, drep : Credential }
 
 
+{-| Register a stake credential using the deposit required by the supplied
+protocol parameters.
+-}
+registerStakeWithProtocolDeposit : ProtocolParameters -> Witness.Credential -> CertificateIntent
+registerStakeWithProtocolDeposit protocolParameters delegator =
+    RegisterStake
+        { delegator = delegator
+        , deposit = protocolParameters.keyDeposit
+        }
+
+
+{-| Register a DRep using the deposit required by the supplied protocol
+parameters.
+-}
+registerDrepWithProtocolDeposit : ProtocolParameters -> { drep : Witness.Credential, info : Maybe Anchor } -> CertificateIntent
+registerDrepWithProtocolDeposit protocolParameters { drep, info } =
+    RegisterDrep
+        { drep = drep
+        , deposit = protocolParameters.drepDeposit
+        , info = info
+        }
+
+
+{-| Register a new stake pool using the deposit required by the supplied
+protocol parameters.
+-}
+registerNewPool : ProtocolParameters -> Pool.Params -> CertificateIntent
+registerNewPool protocolParameters poolParams =
+    RegisterPool { deposit = protocolParameters.poolDeposit } poolParams
+
+
+{-| Update an existing stake pool. Pool updates do not pay another deposit.
+-}
+updatePool : Pool.Params -> CertificateIntent
+updatePool poolParams =
+    RegisterPool { deposit = Natural.zero } poolParams
+
+
 {-| Governance vote.
 -}
 type alias VoteIntent =
@@ -182,6 +226,25 @@ type ActionProposal
     | Info
 
 
+{-| Create a governance proposal using the deposit required by the supplied
+protocol parameters.
+-}
+proposalWithProtocolDeposit :
+    ProtocolParameters
+    ->
+        { govAction : ActionProposal
+        , offchainInfo : Anchor
+        , depositReturnAccount : StakeAddress
+        }
+    -> ProposalIntent
+proposalWithProtocolDeposit protocolParameters proposal =
+    { govAction = proposal.govAction
+    , offchainInfo = proposal.offchainInfo
+    , deposit = protocolParameters.governanceActionDeposit
+    , depositReturnAccount = proposal.depositReturnAccount
+    }
+
+
 {-| Represents additional information for a transaction.
 -}
 type TxOtherInfo
@@ -196,15 +259,6 @@ type TxOtherInfo
 type Fee
     = ManualFee (List { paymentSource : Address, exactFeeAmount : Natural })
     | AutoFee { paymentSource : Address }
-
-
-{-| Initialize fee estimation by setting the fee field to ₳0.5
-This is represented as 500K lovelace, which is encoded as a 32bit uint.
-32bit uint can represent a range from ₳0.065 to ₳4200 so it most likely won’t change.
--}
-defaultAutoFee : Natural
-defaultAutoFee =
-    Natural.fromSafeInt 500000
 
 
 {-| Result of the Tx finalization.
@@ -239,7 +293,31 @@ type TxFinalizationError
     | IncorrectTimeValidityRange String
     | UplcVmError String
     | GovProposalsNotSupportedInSimpleFinalize
+    | MalformedProtocolParameters ProtocolParameters.ValidationError
+    | ProtocolRuleViolation ProtocolRuleError
+    | FeeDidNotConverge { iterations : Int, declared : Natural, computed : Natural }
     | FailurePleaseReportToElmCardano String
+
+
+{-| A protocol rule rejected an otherwise well-formed transaction.
+-}
+type ProtocolRuleError
+    = StakeDepositMismatch { expected : Natural, actual : Natural }
+    | DrepDepositMismatch { expected : Natural, actual : Natural }
+    | GovernanceActionDepositMismatch { expected : Natural, actual : Natural }
+    | PoolDepositMismatch { expected : Natural, actual : Natural }
+    | PoolCostBelowMinimum { minimum : Natural, actual : Natural }
+    | TransactionSizeExceeded { maximum : Int, actual : Int }
+    | OutputValueSizeExceeded { outputIndex : Int, maximum : Int, actual : Int }
+    | CollateralReturnValueSizeExceeded { maximum : Int, actual : Int }
+    | NegativeExecutionUnits { redeemerIndex : Int, mem : Int, steps : Int }
+    | TransactionExecutionUnitsExceeded
+        { maximum : { mem : Int, steps : Int }
+        , actual : { mem : Natural, steps : Natural }
+        }
+    | MissingCostModel Script.PlutusVersion
+    | CollateralInputCountExceeded { maximum : Int, actual : Int }
+    | ReferenceScriptSizeExceeded { maximum : Int, actual : Int }
 
 
 {-| Provide a default function to convert an error to a human-readable string.
@@ -298,8 +376,96 @@ errorToString txFinalizationError =
         GovProposalsNotSupportedInSimpleFinalize ->
             "Governance proposal intents are not supported with the simple `finalize` function. Please use `finalizeAdvanced` instead."
 
+        MalformedProtocolParameters validationError ->
+            "Malformed protocol parameters: " ++ Debug.toString validationError
+
+        ProtocolRuleViolation protocolRuleError ->
+            protocolRuleErrorToString protocolRuleError
+
+        FeeDidNotConverge { iterations, declared, computed } ->
+            "Transaction fee did not converge after "
+                ++ String.fromInt iterations
+                ++ " rounds. The last declared fee was "
+                ++ Natural.toString declared
+                ++ " and the transaction required "
+                ++ Natural.toString computed
+                ++ "."
+
         FailurePleaseReportToElmCardano msg ->
             "Something truely unexpected happened. Please report this error in the #elm channel of TxPipe discord server or in an issue on the GitHub repository. " ++ msg
+
+
+protocolRuleErrorToString : ProtocolRuleError -> String
+protocolRuleErrorToString protocolRuleError =
+    case protocolRuleError of
+        StakeDepositMismatch { expected, actual } ->
+            depositMismatchMessage "stake registration" expected actual
+
+        DrepDepositMismatch { expected, actual } ->
+            depositMismatchMessage "DRep registration" expected actual
+
+        GovernanceActionDepositMismatch { expected, actual } ->
+            depositMismatchMessage "governance action" expected actual
+
+        PoolDepositMismatch { expected, actual } ->
+            "A pool registration deposit must be zero for an update or "
+                ++ Natural.toString expected
+                ++ " for a new pool, but it was "
+                ++ Natural.toString actual
+                ++ "."
+
+        PoolCostBelowMinimum { minimum, actual } ->
+            "The pool cost " ++ Natural.toString actual ++ " is below the protocol minimum " ++ Natural.toString minimum ++ "."
+
+        TransactionSizeExceeded { maximum, actual } ->
+            limitMessage "Transaction size" maximum actual
+
+        OutputValueSizeExceeded { outputIndex, maximum, actual } ->
+            limitMessage ("Value size in output " ++ String.fromInt outputIndex) maximum actual
+
+        CollateralReturnValueSizeExceeded { maximum, actual } ->
+            limitMessage "Collateral-return value size" maximum actual
+
+        NegativeExecutionUnits { redeemerIndex, mem, steps } ->
+            "Redeemer "
+                ++ String.fromInt redeemerIndex
+                ++ " has negative execution units (mem="
+                ++ String.fromInt mem
+                ++ ", steps="
+                ++ String.fromInt steps
+                ++ ")."
+
+        TransactionExecutionUnitsExceeded { maximum, actual } ->
+            "Transaction execution units exceed the protocol maximum. Maximum: "
+                ++ Debug.toString maximum
+                ++ "; actual: "
+                ++ Debug.toString actual
+                ++ "."
+
+        MissingCostModel plutusVersion ->
+            "The transaction uses " ++ Debug.toString plutusVersion ++ " but its cost model is unavailable."
+
+        CollateralInputCountExceeded { maximum, actual } ->
+            limitMessage "Collateral input count" maximum actual
+
+        ReferenceScriptSizeExceeded { maximum, actual } ->
+            limitMessage "Total reference-script size" maximum actual
+
+
+depositMismatchMessage : String -> Natural -> Natural -> String
+depositMismatchMessage kind expected actual =
+    "The "
+        ++ kind
+        ++ " deposit must be "
+        ++ Natural.toString expected
+        ++ ", but it was "
+        ++ Natural.toString actual
+        ++ "."
+
+
+limitMessage : String -> Int -> Int -> String
+limitMessage label maximum actual =
+    label ++ " exceeds the protocol maximum of " ++ String.fromInt maximum ++ "; actual: " ++ String.fromInt actual ++ "."
 
 
 {-| Attempt to balance a transaction with a provided address.
@@ -475,7 +641,8 @@ checkBalance localStateUtxos txIntents =
             }
 
 
-{-| Finalize a transaction before signing and submitting it.
+{-| Finalize a transaction before signing and submitting it with the library's
+static [Cardano.ProtocolParameters.defaultProtocolParameters] set.
 
 Analyze all intents and perform the following actions:
 
@@ -484,13 +651,9 @@ Analyze all intents and perform the following actions:
   - Evaluate script execution costs with default mainnet parameters
   - Try to find fee payment source automatically and compute automatic Tx fee
 
-The network parameters will be automatically chosen to be:
-
-  - default Mainnet parameters if the guessed fee address is from Mainnet
-  - default Preview parameters if the guessed fee address is from a testnet.
-
-Preprod is not supported for this simplified [finalize] function.
-In case you want more customization, please use [finalizeAdvanced].
+The address network is used only to choose the default slot configuration for
+script evaluation. Testnet addresses use Preview's slot configuration; use
+[finalizeWithProtocolParameters] when another slot configuration is required.
 
 -}
 finalize :
@@ -499,56 +662,113 @@ finalize :
     -> List TxIntent
     -> Result TxFinalizationError TxFinalized
 finalize localStateUtxos txOtherInfo txIntents =
-    assertNoGovProposals txIntents
+    ProtocolParameters.validate ProtocolParameters.defaultProtocolParameters
+        |> Result.mapError MalformedProtocolParameters
+        |> Result.andThen (\_ -> assertNoGovProposals txIntents)
         |> Result.andThen (\_ -> guessFeeSource txIntents)
         |> Result.andThen
             (\feeSource ->
-                finalizeAdvanced
-                    { govState = emptyGovernanceState -- proposals are forbidden in simple finalize anyway
-                    , localStateUtxos = localStateUtxos
-                    , coinSelectionAlgo = CoinSelection.largestFirst
-                    , evalScriptsCosts = defaultEvalScriptsCosts feeSource txIntents
-                    , costModels = Uplc.conwayDefaultCostModels
-                    }
-                    (AutoFee { paymentSource = feeSource })
+                finalizeSimple
+                    ProtocolParameters.defaultProtocolParameters
+                    (slotConfigFromAddress feeSource)
+                    localStateUtxos
                     txOtherInfo
                     txIntents
+                    feeSource
             )
 
 
-{-| Helper function for the default Conway script evaluation costs.
+{-| Finalize a transaction with explicit protocol parameters and slot
+configuration while retaining the convenient fee-source inference and default
+coin selection of [finalize].
+-}
+finalizeWithProtocolParameters :
+    ProtocolParameters
+    -> Uplc.SlotConfig
+    -> Utxo.RefDict Output
+    -> List TxOtherInfo
+    -> List TxIntent
+    -> Result TxFinalizationError TxFinalized
+finalizeWithProtocolParameters protocolParameters slotConfig localStateUtxos txOtherInfo txIntents =
+    ProtocolParameters.validate protocolParameters
+        |> Result.mapError MalformedProtocolParameters
+        |> Result.andThen (\_ -> assertNoGovProposals txIntents)
+        |> Result.andThen (\_ -> guessFeeSource txIntents)
+        |> Result.andThen
+            (finalizeSimple protocolParameters slotConfig localStateUtxos txOtherInfo txIntents)
+
+
+finalizeSimple :
+    ProtocolParameters
+    -> Uplc.SlotConfig
+    -> Utxo.RefDict Output
+    -> List TxOtherInfo
+    -> List TxIntent
+    -> Address
+    -> Result TxFinalizationError TxFinalized
+finalizeSimple protocolParameters slotConfig localStateUtxos txOtherInfo txIntents feeSource =
+    finalizeAdvancedWithProtocolParameters
+        protocolParameters
+        { govState = emptyGovernanceState
+        , localStateUtxos = localStateUtxos
+        , coinSelectionAlgo = CoinSelection.largestFirst
+        , evalScriptsCosts = evalScriptsCostsWithProtocolParameters protocolParameters slotConfig txIntents
+        }
+        (AutoFee { paymentSource = feeSource })
+        txOtherInfo
+        txIntents
+
+
+{-| Helper function for script evaluation with the library's static default
+protocol parameters.
 -}
 defaultEvalScriptsCosts : Address -> List TxIntent -> Utxo.RefDict Output -> Transaction -> Result String (List Redeemer)
 defaultEvalScriptsCosts feeSource txIntents =
+    evalScriptsCostsWithProtocolParameters
+        ProtocolParameters.defaultProtocolParameters
+        (slotConfigFromAddress feeSource)
+        txIntents
+
+
+evalScriptsCostsWithProtocolParameters :
+    ProtocolParameters
+    -> Uplc.SlotConfig
+    -> List TxIntent
+    -> Utxo.RefDict Output
+    -> Transaction
+    -> Result String (List Redeemer)
+evalScriptsCostsWithProtocolParameters protocolParameters slotConfig txIntents =
     if containPlutusScripts txIntents then
-        let
-            network =
-                case feeSource of
-                    Byron _ ->
-                        Debug.todo "Byron addresses are not unsupported"
-
-                    Shelley { networkId } ->
-                        networkId
-
-                    Reward { networkId } ->
-                        networkId
-
-            slotConfig =
-                case network of
-                    Mainnet ->
-                        Uplc.slotConfigMainnet
-
-                    Testnet ->
-                        Uplc.slotConfigPreview
-        in
         Uplc.evalScriptsCosts
-            { budget = Uplc.conwayDefaultBudget
+            { budget = protocolParameters.maxTxExUnits
             , slotConfig = slotConfig
-            , costModels = Uplc.conwayDefaultCostModels
+            , costModels = protocolParameters.costModels
             }
 
     else
         \_ _ -> Ok []
+
+
+slotConfigFromAddress : Address -> Uplc.SlotConfig
+slotConfigFromAddress address =
+    let
+        network =
+            case address of
+                Byron _ ->
+                    Debug.todo "Byron addresses are not supported"
+
+                Shelley { networkId } ->
+                    networkId
+
+                Reward { networkId } ->
+                    networkId
+    in
+    case network of
+        Mainnet ->
+            Uplc.slotConfigMainnet
+
+        Testnet ->
+            Uplc.slotConfigPreview
 
 
 {-| Simple helper function needed to check that there isn’t any proposal
@@ -782,7 +1002,9 @@ emptyGovernanceState =
     }
 
 
-{-| Finalize a transaction before signing and submitting it.
+{-| Finalize a transaction before signing and submitting it using the library's
+static [Cardano.ProtocolParameters.defaultProtocolParameters] set, with the
+provided cost models substituted into that set.
 
 Analyze all intents and perform the following actions:
 
@@ -804,6 +1026,63 @@ finalizeAdvanced :
     -> List TxIntent
     -> Result TxFinalizationError TxFinalized
 finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCosts, costModels } fee txOtherInfo txIntents =
+    let
+        defaultProtocolParameters =
+            ProtocolParameters.defaultProtocolParameters
+    in
+    finalizeAdvancedWithProtocolParameters
+        { defaultProtocolParameters | costModels = costModels }
+        { govState = govState
+        , localStateUtxos = localStateUtxos
+        , coinSelectionAlgo = coinSelectionAlgo
+        , evalScriptsCosts = evalScriptsCosts
+        }
+        fee
+        txOtherInfo
+        txIntents
+
+
+{-| Finalize a transaction with caller-supplied protocol parameters.
+
+The protocol parameters control fees, deposits, minimum Ada, collateral,
+execution budgets, cost models, and transaction-local ledger limits.
+
+-}
+finalizeAdvancedWithProtocolParameters :
+    ProtocolParameters
+    ->
+        { govState : GovernanceState
+        , localStateUtxos : Utxo.RefDict Output
+        , coinSelectionAlgo : CoinSelection.Algorithm
+        , evalScriptsCosts : Utxo.RefDict Output -> Transaction -> Result String (List Redeemer)
+        }
+    -> Fee
+    -> List TxOtherInfo
+    -> List TxIntent
+    -> Result TxFinalizationError TxFinalized
+finalizeAdvancedWithProtocolParameters protocolParameters config fee txOtherInfo txIntents =
+    ProtocolParameters.validate protocolParameters
+        |> Result.mapError MalformedProtocolParameters
+        |> Result.andThen (\_ -> validateProtocolIntents protocolParameters txIntents)
+        |> Result.andThen
+            (\_ ->
+                finalizeAdvancedValidated protocolParameters config fee txOtherInfo txIntents
+            )
+
+
+finalizeAdvancedValidated :
+    ProtocolParameters
+    ->
+        { govState : GovernanceState
+        , localStateUtxos : Utxo.RefDict Output
+        , coinSelectionAlgo : CoinSelection.Algorithm
+        , evalScriptsCosts : Utxo.RefDict Output -> Transaction -> Result String (List Redeemer)
+        }
+    -> Fee
+    -> List TxOtherInfo
+    -> List TxIntent
+    -> Result TxFinalizationError TxFinalized
+finalizeAdvancedValidated protocolParameters { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCosts } fee txOtherInfo txIntents =
     case ( processIntents govState localStateUtxos txIntents, processOtherInfo txOtherInfo ) of
         ( Err err, _ ) ->
             Err err
@@ -812,124 +1091,214 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
             Err err
 
         ( Ok processedIntents, Ok processedOtherInfo ) ->
-            let
-                buildTxRound : TxContext -> Fee -> Result TxFinalizationError TxFinalized
-                buildTxRound txContext roundFees =
-                    let
-                        ( feeAmount, feeAddresses ) =
-                            case roundFees of
-                                ManualFee perAddressFee ->
-                                    ( List.foldl (\{ exactFeeAmount } -> Natural.add exactFeeAmount) Natural.zero perAddressFee
-                                    , List.map .paymentSource perAddressFee
-                                    )
-
-                                AutoFee { paymentSource } ->
-                                    ( defaultAutoFee, [ paymentSource ] )
-
-                        ( collateralAmount, collateralSources ) =
-                            if List.isEmpty processedIntents.plutusScriptSources then
-                                ( Natural.zero, Address.emptyDict )
-
-                            else
-                                -- collateral = 1.5 * fee
-                                -- It’s an euclidean division, so if there is a non-zero rest,
-                                -- we add 1 to make sure we aren’t short 1 lovelace.
-                                ( feeAmount
-                                    |> Natural.mul (Natural.fromSafeInt 15)
-                                    |> Natural.divModBy (Natural.fromSafeInt 10)
-                                    |> Maybe.withDefault ( Natural.zero, Natural.zero )
-                                    |> (\( q, r ) -> Natural.add q <| Natural.min r Natural.one)
-                                  -- Identify automatically collateral sources
-                                  -- from fee addresses, free inputs addresses or spent inputs addresses.
-                                , [ feeAddresses
-                                  , Dict.Any.keys processedIntents.freeInputs
-                                  , Dict.Any.keys processedIntents.preSelected.inputs
-                                        |> List.filterMap (\addr -> Dict.Any.get addr localStateUtxos |> Maybe.map .address)
-                                  ]
-                                    |> List.concat
-                                    |> List.filter Address.isShelleyWallet
-                                    -- make the list unique
-                                    |> List.map (\addr -> ( addr, () ))
-                                    |> Address.dictFromList
-                                )
-
-                        updateTxContext : Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output } -> TxContext
-                        updateTxContext coinSelections =
-                            TxContext.updateInputsOutputs
-                                { preSelectedInputs =
-                                    Dict.Any.filterMap (\ref _ -> Dict.Any.get ref localStateUtxos) processedIntents.preSelected.inputs
-                                , preCreatedOutputs = processedIntents.preCreated
-                                }
-                                -- aggregate per-address coin selections into one
-                                (Dict.Any.foldl insertOneSelection { selectedUtxos = Utxo.emptyRefDict, changeOutputs = [] } coinSelections)
-                                txContext
-
-                        insertOneSelection _ { selectedUtxos, changeOutputs } acc =
-                            { selectedUtxos = List.foldl (\( ref, output ) -> Dict.Any.insert ref output) acc.selectedUtxos selectedUtxos
-                            , changeOutputs = changeOutputs ++ acc.changeOutputs
-                            }
-                    in
-                    -- UTxO selection
-                    Result.map2
-                        (\coinSelection collateralSelection ->
-                            -- coinSelection : Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output }
-                            -- Aggregate with pre-selected inputs and pre-created outputs
-                            updateTxContext coinSelection
-                                --> TransactionBody
-                                |> buildTx feeAmount collateralSelection processedIntents processedOtherInfo
-                        )
-                        (computeCoinSelection localStateUtxos roundFees processedIntents coinSelectionAlgo)
-                        (CoinSelection.collateral (CoinSelection.CollateralContext (Dict.Any.toList localStateUtxos) collateralSources collateralAmount)
-                            |> Result.mapError CollateralSelectionError
-                        )
-
-                computeRefScriptBytesForTx tx =
-                    computeRefScriptBytes localStateUtxos (tx.body.referenceInputs ++ tx.body.inputs)
-
-                adjustFees tx =
-                    case fee of
-                        ManualFee _ ->
-                            fee
-
-                        AutoFee { paymentSource } ->
-                            let
-                                refScriptBytes =
-                                    computeRefScriptBytesForTx tx
-                            in
-                            Transaction.computeFees Transaction.defaultTxFeeParams { refScriptBytes = refScriptBytes } tx
-                                |> (\{ txSizeFee, scriptExecFee, refScriptSizeFee } -> Natural.add txSizeFee scriptExecFee |> Natural.add refScriptSizeFee)
-                                |> (\computedFee -> ManualFee [ { paymentSource = paymentSource, exactFeeAmount = computedFee } ])
-            in
-            -- Without estimating cost of plutus script exec, do couple loops of:
-            --   - estimate Tx fees
-            --   - adjust coin selection
-            --   - adjust redeemers
-            buildTxRound TxContext.new fee
-                --> Result String Transaction
-                |> Result.andThen (\{ tx } -> buildTxRound (TxContext.fromTx localStateUtxos tx) (adjustFees tx))
-                -- Evaluate plutus script cost
-                |> Result.andThen (\{ tx } -> (adjustExecutionCosts <| evalScriptsCosts localStateUtxos) tx)
-                -- Redo a final round of above
-                |> Result.andThen (\tx -> buildTxRound (TxContext.fromTx localStateUtxos tx) (adjustFees tx))
-                |> Result.andThen (\{ tx } -> (adjustExecutionCosts <| evalScriptsCosts localStateUtxos) tx)
-                -- Redo a final round of above
-                |> Result.andThen (\tx -> buildTxRound (TxContext.fromTx localStateUtxos tx) (adjustFees tx))
+            validateActiveCostModels protocolParameters.costModels processedIntents
                 |> Result.andThen
-                    (\{ tx, expectedSignatures } ->
-                        (adjustExecutionCosts <| evalScriptsCosts localStateUtxos) tx
-                            -- Potentially replace the dummy auxiliary data hash and script data hash
-                            |> Result.map replaceDummyAuxiliaryDataHash
-                            |> Result.map (replaceDummyScriptDataHash costModels processedIntents)
-                            -- Finally, check if final fees are correct
-                            |> Result.andThen (\finalTx -> checkInsufficientFee { refScriptBytes = computeRefScriptBytesForTx finalTx } fee finalTx)
-                            -- Very finally, clean the placeholder vkey witnesses and append the expected vkey hashes
-                            |> Result.map
-                                (\finalTx ->
-                                    { tx = Transaction.updateSignatures (always Nothing) finalTx
-                                    , expectedSignatures = expectedSignatures
-                                    }
-                                )
+                    (\_ ->
+                        let
+                            feeParameters : Transaction.FeeParameters
+                            feeParameters =
+                                feeParametersFromProtocolParameters protocolParameters
+
+                            buildTxRound : TxContext -> Fee -> Result TxFinalizationError TxFinalized
+                            buildTxRound txContext roundFees =
+                                let
+                                    ( feeAmount, feeAddresses ) =
+                                        case roundFees of
+                                            ManualFee perAddressFee ->
+                                                ( List.foldl (\{ exactFeeAmount } -> Natural.add exactFeeAmount) Natural.zero perAddressFee
+                                                , List.map .paymentSource perAddressFee
+                                                )
+
+                                            AutoFee { paymentSource } ->
+                                                ( protocolParameters.minFeeB, [ paymentSource ] )
+
+                                    ( collateralAmount, collateralSources ) =
+                                        if List.isEmpty processedIntents.plutusScriptSources then
+                                            ( Natural.zero, Address.emptyDict )
+
+                                        else
+                                            ( percentageCeiling protocolParameters.collateralPercentage feeAmount
+                                            , [ feeAddresses
+                                              , Dict.Any.keys processedIntents.freeInputs
+                                              , Dict.Any.keys processedIntents.preSelected.inputs
+                                                    |> List.filterMap (\ref -> Dict.Any.get ref localStateUtxos |> Maybe.map .address)
+                                              ]
+                                                |> List.concat
+                                                |> List.filter Address.isShelleyWallet
+                                                |> List.map (\address -> ( address, () ))
+                                                |> Address.dictFromList
+                                            )
+
+                                    updateTxContext : Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output } -> TxContext
+                                    updateTxContext coinSelections =
+                                        TxContext.updateInputsOutputs
+                                            { preSelectedInputs =
+                                                Dict.Any.filterMap (\ref _ -> Dict.Any.get ref localStateUtxos) processedIntents.preSelected.inputs
+                                            , preCreatedOutputs = processedIntents.preCreated
+                                            }
+                                            (Dict.Any.foldl insertOneSelection { selectedUtxos = Utxo.emptyRefDict, changeOutputs = [] } coinSelections)
+                                            txContext
+
+                                    insertOneSelection _ { selectedUtxos, changeOutputs } acc =
+                                        { selectedUtxos = List.foldl (\( ref, output ) -> Dict.Any.insert ref output) acc.selectedUtxos selectedUtxos
+                                        , changeOutputs = changeOutputs ++ acc.changeOutputs
+                                        }
+                                in
+                                computeCoinSelection protocolParameters.adaPerUtxoByte localStateUtxos roundFees processedIntents coinSelectionAlgo
+                                    |> Result.andThen
+                                        (\coinSelection ->
+                                            let
+                                                updatedTxContext =
+                                                    updateTxContext coinSelection
+
+                                                provisionalTx =
+                                                    buildTx
+                                                        feeAmount
+                                                        { selectedUtxos = [], change = Nothing }
+                                                        processedIntents
+                                                        processedOtherInfo
+                                                        updatedTxContext
+
+                                                collateralUtxos =
+                                                    List.foldl
+                                                        Dict.Any.remove
+                                                        localStateUtxos
+                                                        (provisionalTx.tx.body.inputs ++ provisionalTx.tx.body.referenceInputs)
+                                                        |> Dict.Any.toList
+                                            in
+                                            CoinSelection.collateralWith
+                                                { adaPerUtxoByte = protocolParameters.adaPerUtxoByte
+                                                , maxInputCount = protocolParameters.maxCollateralInputs
+                                                }
+                                                (CoinSelection.CollateralContext collateralUtxos collateralSources collateralAmount)
+                                                |> Result.mapError CollateralSelectionError
+                                                |> Result.map
+                                                    (\collateralSelection ->
+                                                        buildTx feeAmount collateralSelection processedIntents processedOtherInfo updatedTxContext
+                                                    )
+                                        )
+
+                            computeRefScriptBytesForTx tx =
+                                computeRefScriptBytes localStateUtxos (tx.body.referenceInputs ++ tx.body.inputs)
+
+                            requiredFee tx =
+                                Transaction.computeFees feeParameters { refScriptBytes = computeRefScriptBytesForTx tx } tx
+                                    |> (\{ txSizeFee, scriptExecFee, refScriptSizeFee } ->
+                                            Natural.add txSizeFee scriptExecFee
+                                                |> Natural.add refScriptSizeFee
+                                       )
+
+                            prepareRoundTx tx =
+                                adjustExecutionCosts (evalScriptsCosts localStateUtxos) tx
+                                    |> Result.map replaceDummyAuxiliaryDataHash
+                                    |> Result.map (replaceDummyScriptDataHash protocolParameters.costModels processedIntents)
+
+                            finish expectedSignatures tx =
+                                validateTransactionRules protocolParameters localStateUtxos tx
+                                    |> Result.map
+                                        (\_ ->
+                                            { tx = Transaction.updateSignatures (always Nothing) tx
+                                            , expectedSignatures = expectedSignatures
+                                            }
+                                        )
+
+                            converge iteration txContext roundFee previousTx =
+                                buildTxRound txContext roundFee
+                                    |> Result.andThen
+                                        (\{ tx, expectedSignatures } ->
+                                            prepareRoundTx tx
+                                                |> Result.andThen
+                                                    (\preparedTx ->
+                                                        let
+                                                            declared =
+                                                                preparedTx.body.fee
+
+                                                            computed =
+                                                                requiredFee preparedTx
+
+                                                            serialized =
+                                                                Transaction.serialize preparedTx
+
+                                                            transactionIsStable =
+                                                                case previousTx of
+                                                                    Nothing ->
+                                                                        False
+
+                                                                    Just previous ->
+                                                                        previous == serialized
+
+                                                            continueWith nextFee =
+                                                                if iteration >= maxFeeConvergenceRounds then
+                                                                    Err <| FeeDidNotConverge { iterations = iteration, declared = declared, computed = computed }
+
+                                                                else
+                                                                    converge
+                                                                        (iteration + 1)
+                                                                        (TxContext.fromTx localStateUtxos preparedTx)
+                                                                        nextFee
+                                                                        (Just serialized)
+                                                        in
+                                                        case fee of
+                                                            ManualFee _ ->
+                                                                if transactionIsStable then
+                                                                    if declared |> Natural.isLessThan computed then
+                                                                        Err <| InsufficientManualFee { declared = declared, computed = computed }
+
+                                                                    else
+                                                                        finish expectedSignatures preparedTx
+
+                                                                else
+                                                                    continueWith fee
+
+                                                            AutoFee { paymentSource } ->
+                                                                if transactionIsStable && declared == computed then
+                                                                    finish expectedSignatures preparedTx
+
+                                                                else
+                                                                    continueWith <| ManualFee [ { paymentSource = paymentSource, exactFeeAmount = computed } ]
+                                                    )
+                                        )
+
+                            initialRoundFee =
+                                case fee of
+                                    ManualFee _ ->
+                                        fee
+
+                                    AutoFee { paymentSource } ->
+                                        ManualFee [ { paymentSource = paymentSource, exactFeeAmount = protocolParameters.minFeeB } ]
+                        in
+                        converge 1 TxContext.new initialRoundFee Nothing
                     )
+
+
+maxFeeConvergenceRounds : Int
+maxFeeConvergenceRounds =
+    10
+
+
+percentageCeiling : Int -> Natural -> Natural
+percentageCeiling percentage amount =
+    Natural.mul amount (Natural.fromSafeInt percentage)
+        |> Natural.divModBy (Natural.fromSafeInt 100)
+        |> Maybe.map (\( quotient, remainder ) -> Natural.add quotient (Natural.min remainder Natural.one))
+        |> Maybe.withDefault Natural.zero
+
+
+feeParametersFromProtocolParameters : ProtocolParameters -> Transaction.FeeParameters
+feeParametersFromProtocolParameters protocolParameters =
+    let
+        defaultRefScriptFeeParams =
+            Transaction.defaultTxFeeParams.refScriptFeeParams
+    in
+    { baseFee = protocolParameters.minFeeB
+    , feePerByte = protocolParameters.minFeeA
+    , scriptExUnitPrice = protocolParameters.executionCosts
+    , refScriptFeeParams =
+        { minFeeRefScriptCostPerByte = protocolParameters.minFeeRefScriptCostPerByte
+        , multiplier = defaultRefScriptFeeParams.multiplier
+        , sizeIncrement = defaultRefScriptFeeParams.sizeIncrement
+        }
+    }
 
 
 {-| Helper function to update the auxiliary data hash.
@@ -968,6 +1337,37 @@ replaceDummyScriptDataHash costModels intents ({ body } as tx) =
     { tx | body = { body | scriptDataHash = Maybe.map (\_ -> Transaction.hashScriptData activeCostModels tx) body.scriptDataHash } }
 
 
+validateActiveCostModels : CostModels -> ProcessedIntents -> Result TxFinalizationError ()
+validateActiveCostModels costModels intents =
+    let
+        activeVersions =
+            intents.plutusScriptSources
+                |> List.map Tuple.first
+                |> List.Extra.unique
+
+        validateVersion version =
+            let
+                maybeCostModel =
+                    case version of
+                        PlutusV1 ->
+                            costModels.plutusV1
+
+                        PlutusV2 ->
+                            costModels.plutusV2
+
+                        PlutusV3 ->
+                            costModels.plutusV3
+            in
+            maybeCostModel
+                |> Result.fromMaybe (ProtocolRuleViolation <| MissingCostModel version)
+                |> Result.map (always ())
+    in
+    activeVersions
+        |> List.map validateVersion
+        |> Result.Extra.combine
+        |> Result.map (always ())
+
+
 {-| Helper function to compute the total size of reference scripts.
 
 Inputs are only counted once (even if present in both regular and reference inputs).
@@ -992,6 +1392,180 @@ computeRefScriptBytes localStateUtxos references =
         -- extract reference script bytes size
         |> List.map (\scriptRef -> Bytes.width (Script.refBytes scriptRef))
         |> List.sum
+
+
+conwayMaxReferenceScriptSize : Int
+conwayMaxReferenceScriptSize =
+    204800
+
+
+validateTransactionRules : ProtocolParameters -> Utxo.RefDict Output -> Transaction -> Result TxFinalizationError ()
+validateTransactionRules protocolParameters localStateUtxos tx =
+    let
+        transactionSize =
+            Transaction.serialize tx |> Bytes.width
+
+        validateTransactionSize =
+            if transactionSize <= protocolParameters.maxTransactionSize then
+                Ok ()
+
+            else
+                Err <|
+                    ProtocolRuleViolation <|
+                        TransactionSizeExceeded
+                            { maximum = protocolParameters.maxTransactionSize
+                            , actual = transactionSize
+                            }
+
+        valueSize value =
+            E.encode (Value.encode value)
+                |> Bytes.fromBytes
+                |> Bytes.width
+
+        validateOutputValue outputIndex output =
+            let
+                actual =
+                    valueSize output.amount
+            in
+            if actual <= protocolParameters.maxValueSize then
+                Ok ()
+
+            else
+                Err <|
+                    ProtocolRuleViolation <|
+                        OutputValueSizeExceeded
+                            { outputIndex = outputIndex
+                            , maximum = protocolParameters.maxValueSize
+                            , actual = actual
+                            }
+
+        validateOutputValues =
+            tx.body.outputs
+                |> List.indexedMap validateOutputValue
+                |> Result.Extra.combine
+                |> Result.map (always ())
+
+        validateCollateralReturnValue =
+            case tx.body.collateralReturn of
+                Nothing ->
+                    Ok ()
+
+                Just output ->
+                    let
+                        actual =
+                            valueSize output.amount
+                    in
+                    if actual <= protocolParameters.maxValueSize then
+                        Ok ()
+
+                    else
+                        Err <|
+                            ProtocolRuleViolation <|
+                                CollateralReturnValueSizeExceeded
+                                    { maximum = protocolParameters.maxValueSize
+                                    , actual = actual
+                                    }
+
+        redeemers =
+            tx.witnessSet.redeemer |> Maybe.withDefault []
+
+        validateRedeemer index redeemer =
+            if redeemer.exUnits.mem < 0 || redeemer.exUnits.steps < 0 then
+                Err <|
+                    ProtocolRuleViolation <|
+                        NegativeExecutionUnits
+                            { redeemerIndex = index
+                            , mem = redeemer.exUnits.mem
+                            , steps = redeemer.exUnits.steps
+                            }
+
+            else
+                Ok ()
+
+        validateNonNegativeExecutionUnits =
+            redeemers
+                |> List.indexedMap validateRedeemer
+                |> Result.Extra.combine
+                |> Result.map (always ())
+
+        totalExecutionUnits =
+            Transaction.computeTotalExecUnits tx
+
+        executionUnitsExceeded =
+            (totalExecutionUnits.totalMem |> Natural.isGreaterThan (Natural.fromSafeInt protocolParameters.maxTxExUnits.mem))
+                || (totalExecutionUnits.totalSteps |> Natural.isGreaterThan (Natural.fromSafeInt protocolParameters.maxTxExUnits.steps))
+
+        validateExecutionUnits =
+            if executionUnitsExceeded then
+                Err <|
+                    ProtocolRuleViolation <|
+                        TransactionExecutionUnitsExceeded
+                            { maximum = protocolParameters.maxTxExUnits
+                            , actual =
+                                { mem = totalExecutionUnits.totalMem
+                                , steps = totalExecutionUnits.totalSteps
+                                }
+                            }
+
+            else
+                Ok ()
+
+        validateMinimumAda =
+            validMinAdaPerOutput protocolParameters.adaPerUtxoByte tx.body.outputs
+                |> Result.mapError NotEnoughMinAda
+
+        validateCollateralReturnMinimumAda =
+            case tx.body.collateralReturn of
+                Nothing ->
+                    Ok ()
+
+                Just output ->
+                    Utxo.checkMinAdaWith protocolParameters.adaPerUtxoByte output
+                        |> Result.map (always ())
+                        |> Result.mapError NotEnoughMinAda
+
+        collateralInputCount =
+            List.length tx.body.collateral
+
+        validateCollateralInputCount =
+            if collateralInputCount <= protocolParameters.maxCollateralInputs then
+                Ok ()
+
+            else
+                Err <|
+                    ProtocolRuleViolation <|
+                        CollateralInputCountExceeded
+                            { maximum = protocolParameters.maxCollateralInputs
+                            , actual = collateralInputCount
+                            }
+
+        referenceScriptSize =
+            computeRefScriptBytes localStateUtxos (tx.body.referenceInputs ++ tx.body.inputs)
+
+        validateReferenceScriptSize =
+            if referenceScriptSize <= conwayMaxReferenceScriptSize then
+                Ok ()
+
+            else
+                Err <|
+                    ProtocolRuleViolation <|
+                        ReferenceScriptSizeExceeded
+                            { maximum = conwayMaxReferenceScriptSize
+                            , actual = referenceScriptSize
+                            }
+    in
+    [ validateTransactionSize
+    , validateOutputValues
+    , validateCollateralReturnValue
+    , validateNonNegativeExecutionUnits
+    , validateExecutionUnits
+    , validateMinimumAda
+    , validateCollateralReturnMinimumAda
+    , validateCollateralInputCount
+    , validateReferenceScriptSize
+    ]
+        |> Result.Extra.combine
+        |> Result.map (always ())
 
 
 type alias PreProcessedIntents =
@@ -1035,6 +1609,72 @@ noIntent =
     , totalDeposit = Natural.zero
     , totalRefund = Natural.zero
     }
+
+
+{-| Validate caller-specified deposits and pool costs before intent
+preprocessing folds those amounts into transaction balance.
+-}
+validateProtocolIntents : ProtocolParameters -> List TxIntent -> Result TxFinalizationError ()
+validateProtocolIntents protocolParameters txIntents =
+    case txIntents of
+        [] ->
+            Ok ()
+
+        txIntent :: remainingIntents ->
+            let
+                validateRemaining () =
+                    validateProtocolIntents protocolParameters remainingIntents
+
+                requireDeposit errorConstructor expected actual =
+                    if actual == expected then
+                        Ok ()
+
+                    else
+                        Err <| ProtocolRuleViolation <| errorConstructor { expected = expected, actual = actual }
+            in
+            case txIntent of
+                IssueCertificate (RegisterStake { deposit }) ->
+                    requireDeposit StakeDepositMismatch protocolParameters.keyDeposit deposit
+                        |> Result.andThen validateRemaining
+
+                IssueCertificate (RegisterAndDelegateStake { deposit }) ->
+                    requireDeposit StakeDepositMismatch protocolParameters.keyDeposit deposit
+                        |> Result.andThen validateRemaining
+
+                IssueCertificate (RegisterDrep { deposit }) ->
+                    requireDeposit DrepDepositMismatch protocolParameters.drepDeposit deposit
+                        |> Result.andThen validateRemaining
+
+                IssueCertificate (RegisterPool { deposit } poolParams) ->
+                    let
+                        validDeposit =
+                            deposit == Natural.zero || deposit == protocolParameters.poolDeposit
+                    in
+                    if not validDeposit then
+                        Err <|
+                            ProtocolRuleViolation <|
+                                PoolDepositMismatch
+                                    { expected = protocolParameters.poolDeposit
+                                    , actual = deposit
+                                    }
+
+                    else if poolParams.cost |> Natural.isLessThan protocolParameters.minPoolCost then
+                        Err <|
+                            ProtocolRuleViolation <|
+                                PoolCostBelowMinimum
+                                    { minimum = protocolParameters.minPoolCost
+                                    , actual = poolParams.cost
+                                    }
+
+                    else
+                        validateRemaining ()
+
+                Propose { deposit } ->
+                    requireDeposit GovernanceActionDepositMismatch protocolParameters.governanceActionDeposit deposit
+                        |> Result.andThen validateRemaining
+
+                _ ->
+                    validateRemaining ()
 
 
 {-| Initial processing step in order to categorize all intents.
@@ -1402,9 +2042,7 @@ processBalanced govState localStateUtxos txIntents { preProcessedIntents, preSel
                     )
                 |> Utxo.refDictFromList
     in
-    validMinAdaPerOutput (preCreated TxContext.new).outputs
-        |> Result.mapError NotEnoughMinAda
-        |> Result.andThen (\_ -> validateSpentOutputs localStateUtxos spendings)
+    validateSpentOutputs localStateUtxos spendings
         |> Result.andThen (\_ -> validateMints localStateUtxos mints)
         |> Result.andThen (\_ -> validateWithdrawals localStateUtxos withdrawals)
         |> Result.andThen (\_ -> validateVotes localStateUtxos allVotes)
@@ -1435,7 +2073,22 @@ processBalanced govState localStateUtxos txIntents { preProcessedIntents, preSel
                 -- TODO: an improvement would consist in fetching the referenced from the local state utxos,
                 -- and extract the script values, to even remove duplicates both in ref and values.
                 , nativeScriptSources = List.Extra.uniqueBy (Witness.toHex Script.encodeNativeScript) preProcessedIntents.nativeScriptSources
-                , plutusScriptSources = List.Extra.uniqueBy (Tuple.second >> Witness.toHex Bytes.toCbor) allPlutusScriptSources
+                , plutusScriptSources =
+                    List.Extra.uniqueBy
+                        (\( version, source ) ->
+                            ( case version of
+                                PlutusV1 ->
+                                    1
+
+                                PlutusV2 ->
+                                    2
+
+                                PlutusV3 ->
+                                    3
+                            , Witness.toHex Bytes.toCbor source
+                            )
+                        )
+                        allPlutusScriptSources
                 , datumSources = List.Extra.uniqueBy (Witness.toHex Data.toCbor) preProcessedIntents.datumSources
                 , expectedSigners = expectedSigners
                 , requiredSigners = requiredSigners
@@ -1543,16 +2196,16 @@ addPreSelectedInput ref value maybeRedeemer { sum, inputs } =
     }
 
 
-validMinAdaPerOutput : List Output -> Result String ()
-validMinAdaPerOutput outputs =
+validMinAdaPerOutput : Natural -> List Output -> Result String ()
+validMinAdaPerOutput adaPerUtxoByte outputs =
     case outputs of
         [] ->
             Ok ()
 
         output :: rest ->
-            case Utxo.checkMinAda output of
+            case Utxo.checkMinAdaWith adaPerUtxoByte output of
                 Ok _ ->
-                    validMinAdaPerOutput rest
+                    validMinAdaPerOutput adaPerUtxoByte rest
 
                 Err err ->
                     Err err
@@ -1951,12 +2604,13 @@ The output must satisfy minAda.
 
 -}
 computeCoinSelection :
-    Utxo.RefDict Output
+    Natural
+    -> Utxo.RefDict Output
     -> Fee
     -> ProcessedIntents
     -> CoinSelection.Algorithm
     -> Result TxFinalizationError (Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output })
-computeCoinSelection localStateUtxos fee processedIntents coinSelectionAlgo =
+computeCoinSelection adaPerUtxoByte localStateUtxos fee processedIntents coinSelectionAlgo =
     let
         -- Add the fee to free inputs
         addFee : Address -> Natural -> Address.Dict Value -> Address.Dict Value
@@ -1973,7 +2627,7 @@ computeCoinSelection localStateUtxos fee processedIntents coinSelectionAlgo =
                         perAddressFee
 
                 AutoFee { paymentSource } ->
-                    addFee paymentSource defaultAutoFee processedIntents.freeInputs
+                    addFee paymentSource Natural.zero processedIntents.freeInputs
 
         -- These are the free outputs that are unrelated to any address with fees or free input.
         -- Keys only contain addresses that do not appear in freeInputsWithFee.
@@ -1985,7 +2639,7 @@ computeCoinSelection localStateUtxos fee processedIntents coinSelectionAlgo =
         validIndependentFreeOutputs : Result TxFinalizationError (Address.Dict Output)
         validIndependentFreeOutputs =
             independentFreeOutputValues
-                |> Dict.Any.map (\addr output -> Utxo.checkMinAda <| Utxo.simpleOutput addr output)
+                |> Dict.Any.map (\addr output -> Utxo.checkMinAdaWith adaPerUtxoByte <| Utxo.simpleOutput addr output)
                 |> resultDictJoin
                 |> Result.mapError NotEnoughMinAda
 
@@ -2068,7 +2722,7 @@ computeCoinSelection localStateUtxos fee processedIntents coinSelectionAlgo =
             }
 
         coinSelectionAndChangeOutputs =
-            CoinSelection.perAddress perAddressConfig perAddressContext
+            CoinSelection.perAddressWith adaPerUtxoByte perAddressConfig perAddressContext
                 |> Result.mapError FailedToPerformCoinSelection
     in
     Result.map2
@@ -2207,10 +2861,10 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
                     )
                 |> List.filterMap identity
 
-        -- Look for inputs at addresses that will need signatures
+        -- Look for spending and collateral inputs at addresses that will need signatures.
         walletCredsInInputs : List (Bytes CredentialHash)
         walletCredsInInputs =
-            txContext.inputs
+            List.concat [ txContext.inputs, collateralSelection.selectedUtxos ]
                 |> List.filterMap (\( _, output ) -> Address.extractPubKeyHash output.address)
 
         -- Look for stake credentials needed for withdrawals
@@ -2321,13 +2975,14 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
                 |> Utxo.refDictFromList
                 |> Dict.Any.keys
 
-        collateralReturnAmount =
-            (Maybe.withDefault Value.zero collateralSelection.change).lovelace
-
         collateralReturn : Maybe Output
         collateralReturn =
-            List.head collateralSelection.selectedUtxos
-                |> Maybe.map (\( _, output ) -> Utxo.fromLovelace output.address collateralReturnAmount)
+            case ( List.head collateralSelection.selectedUtxos, collateralSelection.change ) of
+                ( Just ( _, output ), Just change ) ->
+                    Just <| Utxo.simpleOutput output.address change
+
+                _ ->
+                    Nothing
 
         totalCollateral : Maybe Int
         totalCollateral =
@@ -2337,7 +2992,14 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
             else
                 collateralSelection.selectedUtxos
                     |> List.foldl (\( _, o ) -> Natural.add o.amount.lovelace) Natural.zero
-                    |> (\sumCollateralInputs -> Natural.sub sumCollateralInputs collateralReturnAmount)
+                    |> (\sumCollateralInputs ->
+                            Natural.sub
+                                sumCollateralInputs
+                                (collateralSelection.change
+                                    |> Maybe.map .lovelace
+                                    |> Maybe.withDefault Natural.zero
+                                )
+                       )
                     |> Natural.toInt
                     |> Just
 
@@ -2547,27 +3209,3 @@ adjustExecutionCosts evalScriptsCosts tx =
                     in
                     { tx | witnessSet = { witnessSet | redeemer = Just redeemers } }
             )
-
-
-{-| Final check for the Tx fees.
--}
-checkInsufficientFee : { refScriptBytes : Int } -> Fee -> Transaction -> Result TxFinalizationError Transaction
-checkInsufficientFee refSize fee tx =
-    let
-        declaredFee =
-            tx.body.fee
-
-        computedFee =
-            Transaction.computeFees Transaction.defaultTxFeeParams refSize tx
-                |> (\{ txSizeFee, scriptExecFee, refScriptSizeFee } -> Natural.add txSizeFee scriptExecFee |> Natural.add refScriptSizeFee)
-    in
-    if declaredFee |> Natural.isLessThan computedFee then
-        case fee of
-            ManualFee _ ->
-                Err <| InsufficientManualFee { declared = declaredFee, computed = computedFee }
-
-            AutoFee _ ->
-                Err <| FailurePleaseReportToElmCardano "Insufficient AutoFee. Maybe we need another buildTx round?"
-
-    else
-        Ok tx

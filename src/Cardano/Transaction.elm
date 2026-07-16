@@ -348,8 +348,8 @@ type RewardTarget
 {-| Parameters required to compute transaction fees.
 -}
 type alias FeeParameters =
-    { baseFee : Int
-    , feePerByte : Int
+    { baseFee : Natural
+    , feePerByte : Natural
     , scriptExUnitPrice : ExUnitPrices
     , refScriptFeeParams : RefScriptFeeParameters
     }
@@ -359,14 +359,14 @@ type alias FeeParameters =
 -}
 defaultTxFeeParams : FeeParameters
 defaultTxFeeParams =
-    { baseFee = 155381
-    , feePerByte = 44
+    { baseFee = Natural.fromSafeInt 155381
+    , feePerByte = Natural.fromSafeInt 44
     , scriptExUnitPrice =
         { memPrice = { numerator = 577, denominator = 10000 }
         , stepPrice = { numerator = 721, denominator = 10000000 }
         }
     , refScriptFeeParams =
-        { minFeeRefScriptCostPerByte = 15
+        { minFeeRefScriptCostPerByte = { numerator = 15, denominator = 1 }
         , multiplier = { numerator = 12, denominator = 10 }
         , sizeIncrement = 25600
         }
@@ -380,7 +380,7 @@ Full explanation of the formula here:
 
 -}
 type alias RefScriptFeeParameters =
-    { minFeeRefScriptCostPerByte : Int -- lovelace/bytes until reaching the second size level
+    { minFeeRefScriptCostPerByte : RationalNumber -- lovelace/bytes until reaching the second size level
     , multiplier : RationalNumber -- exponential cost increase for each size level
     , sizeIncrement : Int -- level size (in bytes) for each exponential fee price change
     }
@@ -401,30 +401,24 @@ computeFees ({ scriptExUnitPrice, refScriptFeeParams } as feeParams) { refScript
 The "baseFee" and "feePerByte" are network parameters.
 
 -}
-computeTxSizeFee : { a | baseFee : Int, feePerByte : Int } -> Transaction -> Natural
+computeTxSizeFee : { a | baseFee : Natural, feePerByte : Natural } -> Transaction -> Natural
 computeTxSizeFee { baseFee, feePerByte } tx =
-    Natural.fromSafeInt (baseFee + feePerByte * (Bytes.width <| serialize tx))
+    Natural.add baseFee
+        (Natural.mul feePerByte (Natural.fromSafeInt (Bytes.width <| serialize tx)))
 
 
 {-| Compute the part of the fees of a Transaction related to the execution of scripts in the Plutus VM.
 -}
 computeScriptExecFee : ExUnitPrices -> Transaction -> Natural
-computeScriptExecFee { stepPrice, memPrice } tx =
+computeScriptExecFee scriptExUnitPrice tx =
     let
         { totalSteps, totalMem } =
             computeTotalExecUnits tx
-
-        totalStepsCost =
-            Natural.mul totalSteps (Natural.fromSafeInt stepPrice.numerator)
-                |> Natural.divBy (Natural.fromSafeInt stepPrice.denominator)
-                |> Maybe.withDefault Natural.zero
-
-        totalMemCost =
-            Natural.mul totalMem (Natural.fromSafeInt memPrice.numerator)
-                |> Natural.divBy (Natural.fromSafeInt memPrice.denominator)
-                |> Maybe.withDefault Natural.zero
     in
-    Natural.add totalStepsCost totalMemCost
+    Redeemer.feeCostNatural scriptExUnitPrice
+        { mem = totalMem
+        , steps = totalSteps
+        }
 
 
 {-| Compute the total execution units of a Transaction.
@@ -466,11 +460,18 @@ computeRefScriptFee : RefScriptFeeParameters -> Int -> Natural
 computeRefScriptFee ({ minFeeRefScriptCostPerByte } as p) refScriptBytes =
     let
         baseTierPricePerByte =
-            RationalNat.fromSafeInt minFeeRefScriptCostPerByte
+            rationalNumberToRationalNat minFeeRefScriptCostPerByte
     in
     refScriptFeeHelper p { bytesLeft = refScriptBytes, tierPricePerByte = baseTierPricePerByte } RationalNat.zero
         |> RationalNat.floor
         |> Maybe.withDefault Natural.zero
+
+
+rationalNumberToRationalNat : RationalNumber -> RationalNat
+rationalNumberToRationalNat { numerator, denominator } =
+    { num = Natural.fromSafeInt numerator
+    , denom = Natural.fromSafeInt denominator
+    }
 
 
 refScriptFeeHelper : RefScriptFeeParameters -> { bytesLeft : Int, tierPricePerByte : RationalNat } -> RationalNat -> RationalNat

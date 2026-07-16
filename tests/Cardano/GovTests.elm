@@ -3,6 +3,8 @@ module Cardano.GovTests exposing (suite)
 import Bytes.Comparable as Bytes
 import Cardano.Address exposing (Credential(..))
 import Cardano.Gov as Gov
+import Cbor.Decode as D
+import Cbor.Encode as E
 import Expect exposing (Expectation)
 import Test exposing (Test, describe, test)
 
@@ -27,7 +29,37 @@ suite =
             , test "Cc cold" ccColdBech32EncodingTest
             , test "DRep" drepBech32EncodingTest
             ]
+        , describe "Protocol parameter updates"
+            [ test "field 33 rational CBOR round trip" protocolParamUpdateField33RoundTrip
+            , test "field 33 uses the tagged rational encoding" protocolParamUpdateField33Encoding
+            ]
         ]
+
+
+protocolParamUpdateField33 : Gov.ProtocolParamUpdate
+protocolParamUpdateField33 =
+    let
+        noParamUpdate =
+            Gov.noParamUpdate
+    in
+    { noParamUpdate
+        | minFeeRefScriptCostPerByte = Just { numerator = 15, denominator = 2 }
+    }
+
+
+protocolParamUpdateField33RoundTrip : () -> Expectation
+protocolParamUpdateField33RoundTrip _ =
+    E.encode (Gov.encodeProtocolParamUpdate protocolParamUpdateField33)
+        |> D.decode Gov.decodeProtocolParamUpdate
+        |> Expect.equal (Just protocolParamUpdateField33)
+
+
+protocolParamUpdateField33Encoding : () -> Expectation
+protocolParamUpdateField33Encoding _ =
+    E.encode (Gov.encodeProtocolParamUpdate protocolParamUpdateField33)
+        |> Bytes.fromBytes
+        |> Bytes.toHex
+        |> Expect.equal "a11821d81e820f02"
 
 
 

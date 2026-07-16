@@ -1,7 +1,7 @@
 module RationalNat exposing
     ( RationalNat
     , zero, fromSafeInt
-    , add, mul, floor
+    , add, mul, floor, ceiling
     )
 
 {-| Unbounded positive rational numbers,
@@ -11,7 +11,7 @@ based on [Natural] numbers for the fraction.
 
 @docs zero, fromSafeInt
 
-@docs add, mul, floor
+@docs add, mul, floor, ceiling
 
 -}
 
@@ -81,3 +81,22 @@ Return [Nothing] if the denominator is 0.
 floor : RationalNat -> Maybe Natural
 floor r =
     r.num |> Natural.divBy r.denom
+
+
+{-| Return the smallest integer greater than or equal to this rational number.
+
+Return [Nothing] if the denominator is 0.
+
+-}
+ceiling : RationalNat -> Maybe Natural
+ceiling r =
+    r.num
+        |> Natural.divModBy r.denom
+        |> Maybe.map
+            (\( quotient, remainder ) ->
+                if Natural.isZero remainder then
+                    quotient
+
+                else
+                    Natural.add quotient Natural.one
+            )
