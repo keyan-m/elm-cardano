@@ -884,7 +884,7 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                                                 Err <| InvalidCollateralWithoutReturn "the selected output is absent from local state"
 
                                             Just output ->
-                                                if not <| Utxo.isPlainAdaOnly output then
+                                                if not <| Utxo.isAdaOnly output then
                                                     Err <| InvalidCollateralWithoutReturn "the selected output must contain only ADA"
 
                                                 else if not <| Address.isShelleyWallet output.address then
