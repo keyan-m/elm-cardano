@@ -511,7 +511,7 @@ collateral { availableUtxos, allowedAddresses, targetAmount } =
                     (\( _, output ) -> Dict.Any.member output.address allowedAddresses)
 
         ( adaOnly, notAdaOnly ) =
-            List.partition (\( _, output ) -> Utxo.isAdaOnly output)
+            List.partition (\( _, output ) -> Utxo.isPlainAdaOnly output)
                 utxosInAllowedAddresses
 
         ( assetsOnly, notAssetsOnly ) =

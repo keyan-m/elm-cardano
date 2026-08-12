@@ -866,29 +866,12 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                             , changeOutputs = changeOutputs ++ acc.changeOutputs
                             }
 
-                        spendableLocalStateUtxos : Utxo.RefDict Output
-                        spendableLocalStateUtxos =
+                        selectCollateral : Result TxFinalizationError CoinSelection.Selection
+                        selectCollateral =
                             case processedOtherInfo.collateralWithoutReturn of
                                 Nothing ->
-                                    localStateUtxos
-
-                                Just reference ->
-                                    Dict.Any.remove reference localStateUtxos
-
-                        selectCollateral : TxFinalized -> Result TxFinalizationError CoinSelection.Selection
-                        selectCollateral provisionalTx =
-                            case processedOtherInfo.collateralWithoutReturn of
-                                Nothing ->
-                                    let
-                                        collateralUtxos =
-                                            List.foldl
-                                                Dict.Any.remove
-                                                localStateUtxos
-                                                (provisionalTx.tx.body.inputs ++ provisionalTx.tx.body.referenceInputs)
-                                                |> Dict.Any.toList
-                                    in
                                     CoinSelection.collateral
-                                        (CoinSelection.CollateralContext collateralUtxos collateralSources collateralAmount)
+                                        (CoinSelection.CollateralContext (Dict.Any.toList localStateUtxos) collateralSources collateralAmount)
                                         |> Result.mapError CollateralSelectionError
 
                                 Just reference ->
@@ -901,11 +884,11 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                                                 Err <| InvalidCollateralWithoutReturn "the selected output is absent from local state"
 
                                             Just output ->
-                                                if not <| Utxo.isAdaOnly output then
+                                                if not <| Utxo.isPlainAdaOnly output then
                                                     Err <| InvalidCollateralWithoutReturn "the selected output must contain only ADA"
 
-                                                else if not <| Dict.Any.member output.address collateralSources then
-                                                    Err <| InvalidCollateralWithoutReturn "the selected output is not controlled by a transaction signer"
+                                                else if not <| Address.isShelleyWallet output.address then
+                                                    Err <| InvalidCollateralWithoutReturn "the selected output must be controlled by a verification key"
 
                                                 else if output.amount.lovelace |> Natural.isLessThan collateralAmount then
                                                     Err <|
@@ -923,27 +906,16 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                                                         }
                     in
                     -- UTxO selection
-                    computeCoinSelection spendableLocalStateUtxos roundFees processedIntents coinSelectionAlgo
-                        |> Result.andThen
-                            (\coinSelection ->
-                                let
-                                    updatedTxContext =
-                                        updateTxContext coinSelection
-
-                                    provisionalTx =
-                                        buildTx
-                                            feeAmount
-                                            { selectedUtxos = [], change = Nothing }
-                                            processedIntents
-                                            processedOtherInfo
-                                            updatedTxContext
-                                in
-                                selectCollateral provisionalTx
-                                    |> Result.map
-                                        (\collateralSelection ->
-                                            buildTx feeAmount collateralSelection processedIntents processedOtherInfo updatedTxContext
-                                        )
-                            )
+                    Result.map2
+                        (\coinSelection collateralSelection ->
+                            -- coinSelection : Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output }
+                            -- Aggregate with pre-selected inputs and pre-created outputs
+                            updateTxContext coinSelection
+                                --> TransactionBody
+                                |> buildTx feeAmount collateralSelection processedIntents processedOtherInfo
+                        )
+                        (computeCoinSelection localStateUtxos roundFees processedIntents coinSelectionAlgo)
+                        selectCollateral
 
                 computeRefScriptBytesForTx tx =
                     computeRefScriptBytes localStateUtxos (tx.body.referenceInputs ++ tx.body.inputs)

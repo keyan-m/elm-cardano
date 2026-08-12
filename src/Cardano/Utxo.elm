@@ -3,7 +3,7 @@ module Cardano.Utxo exposing
     , RefDict, emptyRefDict, refDictFromList
     , fromLovelace, simpleOutput
     , refAsString
-    , lovelace, totalLovelace, compareLovelace, isAdaOnly, isAssetsOnly
+    , lovelace, totalLovelace, compareLovelace, isPlainAdaOnly, isAssetsOnly
     , minAda, checkMinAda, withMinAda, minAdaForAssets, freeAda, bytesWidth
     , encodeOutputReference, encodeOutput, encodeDatumOption
     , decodeOutputReference, decodeOutput
@@ -36,7 +36,7 @@ module Cardano.Utxo exposing
 
 ## Query
 
-@docs lovelace, totalLovelace, compareLovelace, isAdaOnly, isAssetsOnly
+@docs lovelace, totalLovelace, compareLovelace, isPlainAdaOnly, isAssetsOnly
 
 
 ## Compute
@@ -198,8 +198,8 @@ totalLovelace =
 {-| Check if the output contains only Ada.
 Nothing else is allowed, no tokens, no datum, no ref script.
 -}
-isAdaOnly : Output -> Bool
-isAdaOnly { amount, datumOption, referenceScript } =
+isPlainAdaOnly : Output -> Bool
+isPlainAdaOnly { amount, datumOption, referenceScript } =
     (amount.assets == MultiAsset.empty)
         && (datumOption == Nothing)
         && (referenceScript == Nothing)
