@@ -1,6 +1,7 @@
 module Cardano.Cip25Tests exposing (suite)
 
 import Bytes.Comparable as Bytes
+import Cardano.AuxiliaryData as AuxiliaryData
 import Cardano.Cip25 as Cip25
 import Cardano.Metadatum as Metadatum
 import Cardano.Transaction as Transaction
@@ -107,18 +108,90 @@ suite =
                         in
                         case Cip25.singleton policyId assetName assetMetadata of
                             Just cip25 ->
-                                cip25
-                                    |> Cip25.toCbor
-                                    |> E.encode
-                                    |> D.decode Cip25.fromCbor
-                                    |> Maybe.andThen (Cip25.getAssetMetadata policyId assetName)
-                                    |> Expect.equal (Just assetMetadata)
+                                Expect.all
+                                    [ \_ ->
+                                        cip25
+                                            |> Cip25.toMetadatum
+                                            |> Cip25.fromMetadatum
+                                            |> Maybe.andThen (Cip25.getAssetMetadata policyId assetName)
+                                            |> Expect.equal (Just assetMetadata)
+                                    , \_ ->
+                                        cip25
+                                            |> Cip25.toCbor
+                                            |> E.encode
+                                            |> D.decode Cip25.fromCbor
+                                            |> Maybe.andThen (Cip25.getAssetMetadata policyId assetName)
+                                            |> Expect.equal (Just assetMetadata)
+                                    ]
+                                    ()
 
                             Nothing ->
                                 Expect.fail "Expected valid policy id and asset name"
 
                     _ ->
                         Expect.fail "Expected MIME types to be valid"
+        , test "toMetadatum bridges v2 cip25 into auxiliary data" <|
+            \_ ->
+                let
+                    metadata =
+                        Cip25.assetMetadata "A" "ipfs://x"
+                in
+                case Cip25.singleton validPolicyId validAssetName metadata of
+                    Just cip25 ->
+                        let
+                            expectedMetadatum =
+                                Metadatum.Map
+                                    [ ( Metadatum.Bytes (Bytes.toAny validPolicyId)
+                                      , Metadatum.Map
+                                            [ ( Metadatum.Bytes (Bytes.toAny validAssetName)
+                                              , Metadatum.Map
+                                                    [ ( Metadatum.String "name", Metadatum.String "A" )
+                                                    , ( Metadatum.String "image", Metadatum.String "ipfs://x" )
+                                                    ]
+                                              )
+                                            ]
+                                      )
+                                    , ( Metadatum.String "version", Metadatum.Int (Integer.fromSafeInt 2) )
+                                    ]
+
+                            bridged =
+                                Cip25.toMetadatum cip25
+
+                            roundTrippedAuxiliaryData =
+                                AuxiliaryData.fromJustLabels [ ( Cip25.label, bridged ) ]
+                                    |> AuxiliaryData.toCbor
+                                    |> E.encode
+                                    |> D.decode AuxiliaryData.fromCbor
+
+                            roundTrippedAssetMetadata =
+                                roundTrippedAuxiliaryData
+                                    |> Maybe.andThen
+                                        (.labels
+                                            >> List.filter (\( label, _ ) -> label == Cip25.label)
+                                            >> List.head
+                                            >> Maybe.map Tuple.second
+                                        )
+                                    |> Maybe.andThen
+                                        Cip25.fromMetadatum
+                                    |> Maybe.andThen (Cip25.getAssetMetadata validPolicyId validAssetName)
+                        in
+                        Expect.all
+                            [ \_ ->
+                                bridged
+                                    |> Expect.equal expectedMetadatum
+                            , \_ ->
+                                roundTrippedAssetMetadata
+                                    |> Expect.equal (Just metadata)
+                            , \_ ->
+                                cip25
+                                    |> Cip25.toCbor
+                                    |> E.encode
+                                    |> Expect.equal (Metadatum.toCbor bridged |> E.encode)
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "Expected valid policy id and asset name"
         , test "reserved asset and file fields cannot be shadowed by otherProps" <|
             \_ ->
                 case ( Cip25.imageMimeFromString "image/png", Cip25.file "manifest" "application/json" "ipfs://manifest" ) of
@@ -207,6 +280,12 @@ suite =
                                     |> Expect.equal (Just (Cip25.assetMetadata "A" "ipfs://x"))
                             , \_ ->
                                 cip25
+                                    |> Cip25.toMetadatum
+                                    |> Cip25.fromMetadatum
+                                    |> Maybe.andThen (Cip25.getAssetMetadata validPolicyId validAssetName)
+                                    |> Expect.equal (Just (Cip25.assetMetadata "A" "ipfs://x"))
+                            , \_ ->
+                                cip25
                                     |> Cip25.toCbor
                                     |> E.encode
                                     |> Hex.fromBytes
@@ -220,6 +299,110 @@ suite =
 
                     Nothing ->
                         Expect.fail "Expected synthesized v1 payload to decode"
+        , test "fromMetadatum decodes integer v1 metadata" <|
+            \_ ->
+                let
+                    metadatum =
+                        Metadatum.Map
+                            [ ( Metadatum.String validPolicyIdHex
+                              , Metadatum.Map
+                                    [ ( Metadatum.String "A"
+                                      , Metadatum.Map
+                                            [ ( Metadatum.String "name", Metadatum.String "A" )
+                                            , ( Metadatum.String "image", Metadatum.String "ipfs://x" )
+                                            ]
+                                      )
+                                    ]
+                              )
+                            , ( Metadatum.String "version", Metadatum.Int Integer.one )
+                            ]
+                in
+                metadatum
+                    |> Cip25.fromMetadatum
+                    |> Maybe.map Cip25.toMetadatum
+                    |> Expect.equal (Just metadatum)
+        , test "fromMetadatum rejects malformed CIP-25 metadata" <|
+            \_ ->
+                let
+                    v2WithPolicy policyId assetMetadata =
+                        Metadatum.Map
+                            [ ( Metadatum.Bytes (Bytes.toAny policyId)
+                              , Metadatum.Map
+                                    [ ( Metadatum.Bytes (Bytes.toAny validAssetName)
+                                      , assetMetadata
+                                      )
+                                    ]
+                              )
+                            , ( Metadatum.String "version", Metadatum.Int Integer.two )
+                            ]
+
+                    v2 assetMetadata =
+                        v2WithPolicy validPolicyId assetMetadata
+
+                    minimalAssetMetadata =
+                        Metadatum.Map
+                            [ ( Metadatum.String "name", Metadatum.String "A" )
+                            , ( Metadatum.String "image", Metadatum.String "ipfs://x" )
+                            ]
+                in
+                Expect.all
+                    [ \_ ->
+                        Metadatum.String "not a map"
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        Metadatum.Map
+                            [ ( Metadatum.String "version", Metadatum.String "2.0" ) ]
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        Metadatum.Map
+                            [ ( Metadatum.String "version", Metadatum.Int Integer.two )
+                            , ( Metadatum.String "version", Metadatum.Int Integer.two )
+                            ]
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        Metadatum.Map
+                            [ ( Metadatum.String validPolicyIdHex, Metadatum.Map [] )
+                            , ( Metadatum.String "version", Metadatum.Int Integer.two )
+                            ]
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        v2WithPolicy (Bytes.fromText "short") minimalAssetMetadata
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        v2
+                            (Metadatum.Map
+                                [ ( Metadatum.String "name", Metadatum.String "A" ) ]
+                            )
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        v2
+                            (Metadatum.Map
+                                [ ( Metadatum.String "name", Metadatum.String "A" )
+                                , ( Metadatum.String "image", Metadatum.String "ipfs://x" )
+                                , ( Metadatum.String "mediaType", Metadatum.String "application/json" )
+                                ]
+                            )
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    , \_ ->
+                        v2
+                            (Metadatum.Map
+                                [ ( Metadatum.String "name"
+                                  , Metadatum.List [ Metadatum.String (String.repeat 65 "a") ]
+                                  )
+                                , ( Metadatum.String "image", Metadatum.String "ipfs://x" )
+                                ]
+                            )
+                            |> Cip25.fromMetadatum
+                            |> Expect.equal Nothing
+                    ]
+                    ()
         , test "cip25 rejects policy ids with invalid length" <|
             \_ ->
                 v2Payload
@@ -301,6 +484,12 @@ suite =
                         let
                             expected =
                                 tappyAssetMetadata
+
+                            directlyDecoded =
+                                payload
+                                    |> Hex.toBytesUnchecked
+                                    |> D.decode Metadatum.fromCbor
+                                    |> Maybe.andThen Cip25.fromMetadatum
                         in
                         Expect.all
                             [ \_ ->
@@ -313,6 +502,17 @@ suite =
                                     |> E.encode
                                     |> Hex.fromBytes
                                     |> Expect.equal payload
+                            , \_ ->
+                                cip25
+                                    |> Cip25.toMetadatum
+                                    |> Metadatum.toCbor
+                                    |> E.encode
+                                    |> Hex.fromBytes
+                                    |> Expect.equal payload
+                            , \_ ->
+                                directlyDecoded
+                                    |> Maybe.andThen (Cip25.getAssetMetadata tappyPolicyId tappyAssetName)
+                                    |> Expect.equal (Just expected)
                             ]
                             ()
 
@@ -339,13 +539,7 @@ suite =
                                         |> List.head
                                         |> Maybe.map Tuple.second
                                 )
-                            |> Maybe.andThen
-                                (\metadatum ->
-                                    metadatum
-                                        |> Metadatum.toCbor
-                                        |> E.encode
-                                        |> D.decode Cip25.fromCbor
-                                )
+                            |> Maybe.andThen Cip25.fromMetadatum
                             |> Maybe.andThen (Cip25.getAssetMetadata tappyPolicyId tappyAssetName)
                 in
                 decoded
@@ -371,6 +565,12 @@ suite =
 
                             assetName =
                                 Bytes.fromText "SHARL"
+
+                            directlyDecoded =
+                                payload
+                                    |> Hex.toBytesUnchecked
+                                    |> D.decode Metadatum.fromCbor
+                                    |> Maybe.andThen Cip25.fromMetadatum
 
                             expected =
                                 { name = "SHARL HUSKENSAN"
@@ -407,6 +607,10 @@ suite =
                                     |> E.encode
                                     |> Hex.fromBytes
                                     |> Expect.equal payload
+                            , \_ ->
+                                directlyDecoded
+                                    |> Maybe.andThen (Cip25.getAssetMetadata policyId assetName)
+                                    |> Expect.equal (Just expected)
                             ]
                             ()
 

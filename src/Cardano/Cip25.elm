@@ -2,7 +2,7 @@ module Cardano.Cip25 exposing
     ( Cip25, PolicyMetadata, AssetMetadata
     , File, ImageMime, MimeType, Uri
     , singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
-    , fromCbor, toCbor
+    , fromCbor, toCbor, fromMetadatum, toMetadatum
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -20,22 +20,21 @@ that transaction.
 
 @docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
-@docs fromCbor, toCbor
+@docs fromCbor, toCbor, fromMetadatum, toMetadatum
 
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
 @docs mimeTypeFromString, mimeTypeToString
 
 -}
 
-import Bytes as RawBytes
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum as Metadatum exposing (Metadatum)
 import Cardano.MultiAsset as MultiAsset exposing (AssetName, PolicyId)
 import Cbor.Decode as D
 import Cbor.Encode as E
-import Cbor.Encode.Extra as EE
 import Dict exposing (Dict)
+import Integer
 import Maybe.Extra
 import Natural exposing (Natural)
 
@@ -254,117 +253,144 @@ assetMetadata name image =
     }
 
 
-{-| Encode the CIP-0025 payload that belongs under metadata label 721.
+{-| Convert CIP-0025 to the transaction metadatum that belongs under label 721.
 -}
-toCbor : Cip25 -> E.Encoder
-toCbor (Cip25 cip25) =
+toMetadatum : Cip25 -> Metadatum
+toMetadatum (Cip25 cip25) =
     let
         v1PolicyEntries =
             cip25.policies
                 |> BytesMap.toList
                 |> List.map
                     (\( policyId, policyMetadata ) ->
-                        ( Bytes.toHex policyId
+                        ( Metadatum.String (Bytes.toHex policyId)
                         , policyMetadata
                             |> BytesMap.toList
-                            |> List.map
-                                (Tuple.mapFirst v1AssetNameBytesToCbor)
-                            |> EE.associativeList identity assetMetadataToCbor
+                            |> List.map v1AssetMetadataToMetadatum
+                            |> Metadatum.Map
                         )
                     )
 
-        v1ToCbor versionEntries =
-            EE.associativeList E.string identity <|
+        v1ToMetadatum versionEntries =
+            Metadatum.Map <|
                 v1PolicyEntries
                     ++ versionEntries
     in
     case cip25.version of
         V1Implicit ->
-            v1ToCbor []
+            v1ToMetadatum []
 
         V1String version ->
-            v1ToCbor [ ( "version", E.string version ) ]
+            v1ToMetadatum [ ( Metadatum.String "version", Metadatum.String version ) ]
 
         V1Int ->
-            v1ToCbor [ ( "version", E.int 1 ) ]
+            v1ToMetadatum [ ( Metadatum.String "version", Metadatum.Int (Integer.fromSafeInt 1) ) ]
 
         V2 ->
-            EE.associativeList identity identity <|
+            Metadatum.Map <|
                 (cip25.policies
                     |> BytesMap.toList
                     |> List.map
                         (\( policyId, policyMetadata ) ->
-                            ( Bytes.toCbor policyId
-                            , BytesMap.toCbor assetMetadataToCbor policyMetadata
+                            ( Metadatum.Bytes (Bytes.toAny policyId)
+                            , policyMetadata
+                                |> BytesMap.toList
+                                |> List.map v2AssetMetadataToMetadatum
+                                |> Metadatum.Map
                             )
                         )
                 )
-                    ++ [ ( E.string "version", E.int 2 ) ]
+                    ++ [ ( Metadatum.String "version", Metadatum.Int (Integer.fromSafeInt 2) ) ]
+
+
+v1AssetMetadataToMetadatum : ( Bytes AssetName, AssetMetadata ) -> ( Metadatum, Metadatum )
+v1AssetMetadataToMetadatum ( assetName, metadata ) =
+    ( assetName
+        |> Bytes.toText
+        |> Maybe.withDefault ""
+        |> Metadatum.String
+    , assetMetadataToMetadatum metadata
+    )
+
+
+v2AssetMetadataToMetadatum : ( Bytes AssetName, AssetMetadata ) -> ( Metadatum, Metadatum )
+v2AssetMetadataToMetadatum ( assetName, metadata ) =
+    ( Metadatum.Bytes (Bytes.toAny assetName)
+    , assetMetadataToMetadatum metadata
+    )
+
+
+{-| Encode the CIP-0025 payload that belongs under metadata label 721.
+-}
+toCbor : Cip25 -> E.Encoder
+toCbor =
+    toMetadatum >> Metadatum.toCbor
 
 
 {-| Decode the CIP-0025 payload from metadata label 721.
 -}
 fromCbor : D.Decoder Cip25
 fromCbor =
-    D.associativeList D.raw D.raw
+    Metadatum.fromCbor
         |> D.andThen
-            (\pairs ->
-                case versionFromCborPairs pairs of
-                    Just V1Implicit ->
-                        case decodeV1Policies (withoutVersion pairs) of
-                            Just policies ->
-                                D.succeed (Cip25 { version = V1Implicit, policies = policies })
-
-                            Nothing ->
-                                D.fail
-
-                    Just (V1String version) ->
-                        case decodeV1Policies (withoutVersion pairs) of
-                            Just policies ->
-                                D.succeed (Cip25 { version = V1String version, policies = policies })
-
-                            Nothing ->
-                                D.fail
-
-                    Just V1Int ->
-                        case decodeV1Policies (withoutVersion pairs) of
-                            Just policies ->
-                                D.succeed (Cip25 { version = V1Int, policies = policies })
-
-                            Nothing ->
-                                D.fail
-
-                    Just V2 ->
-                        case decodeV2Policies (withoutVersion pairs) of
-                            Just policies ->
-                                D.succeed (Cip25 { version = V2, policies = policies })
-
-                            Nothing ->
-                                D.fail
-
-                    Nothing ->
-                        D.fail
+            (fromMetadatum
+                >> Maybe.map D.succeed
+                >> Maybe.withDefault D.fail
             )
 
 
-versionFromCborPairs : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe Version
-versionFromCborPairs pairs =
+{-| Convert the transaction metadatum under label 721 to CIP-0025.
+-}
+fromMetadatum : Metadatum -> Maybe Cip25
+fromMetadatum metadatum =
+    case metadatum of
+        Metadatum.Map pairs ->
+            case versionFromMetadatumPairs pairs of
+                Just V1Implicit ->
+                    decodeV1Policies (withoutVersion pairs)
+                        |> Maybe.map (\policies -> Cip25 { version = V1Implicit, policies = policies })
+
+                Just (V1String version) ->
+                    decodeV1Policies (withoutVersion pairs)
+                        |> Maybe.map (\policies -> Cip25 { version = V1String version, policies = policies })
+
+                Just V1Int ->
+                    decodeV1Policies (withoutVersion pairs)
+                        |> Maybe.map (\policies -> Cip25 { version = V1Int, policies = policies })
+
+                Just V2 ->
+                    decodeV2Policies (withoutVersion pairs)
+                        |> Maybe.map (\policies -> Cip25 { version = V2, policies = policies })
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+versionFromMetadatumPairs : List ( Metadatum, Metadatum ) -> Maybe Version
+versionFromMetadatumPairs pairs =
     case List.filter (Tuple.first >> isVersionKey) pairs of
         [] ->
             Just V1Implicit
 
-        [ ( _, rawVersion ) ] ->
-            case ( D.decode D.int rawVersion, D.decode D.string rawVersion ) of
-                ( Just 1, _ ) ->
-                    Just V1Int
+        [ ( _, version ) ] ->
+            case version of
+                Metadatum.Int value ->
+                    if value == Integer.one then
+                        Just V1Int
 
-                ( Just 2, _ ) ->
-                    Just V2
+                    else if value == Integer.two then
+                        Just V2
 
-                ( _, Just "1" ) ->
+                    else
+                        Nothing
+
+                Metadatum.String "1" ->
                     Just (V1String "1")
 
-                ( _, Just "1.0" ) ->
+                Metadatum.String "1.0" ->
                     Just (V1String "1.0")
 
                 _ ->
@@ -374,34 +400,31 @@ versionFromCborPairs pairs =
             Nothing
 
 
-withoutVersion : List ( RawBytes.Bytes, RawBytes.Bytes ) -> List ( RawBytes.Bytes, RawBytes.Bytes )
+withoutVersion : List ( Metadatum, Metadatum ) -> List ( Metadatum, Metadatum )
 withoutVersion =
     List.filter (Tuple.first >> isVersionKey >> not)
 
 
-isVersionKey : RawBytes.Bytes -> Bool
-isVersionKey rawKey =
-    D.decode D.string rawKey == Just "version"
+isVersionKey : Metadatum -> Bool
+isVersionKey key =
+    key == Metadatum.String "version"
 
 
-decodeV1Policies : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe (BytesMap PolicyId PolicyMetadata)
+decodeV1Policies : List ( Metadatum, Metadatum ) -> Maybe (BytesMap PolicyId PolicyMetadata)
 decodeV1Policies pairs =
     Maybe.Extra.combineMap decodeV1Policy pairs
         |> Maybe.map BytesMap.fromList
 
 
-decodeV1Policy : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes PolicyId, PolicyMetadata )
-decodeV1Policy ( rawPolicyId, rawPolicyMetadata ) =
-    case D.decode D.string rawPolicyId of
-        Just policyIdHex ->
+decodeV1Policy : ( Metadatum, Metadatum ) -> Maybe ( Bytes PolicyId, PolicyMetadata )
+decodeV1Policy pair =
+    case pair of
+        ( Metadatum.String policyIdHex, Metadatum.Map policyMetadata ) ->
             case Bytes.fromHex policyIdHex of
                 Just policyId ->
                     if MultiAsset.isValidPolicyId policyId then
-                        D.decode (D.associativeList D.raw D.raw) rawPolicyMetadata
-                            |> Maybe.andThen
-                                (Maybe.Extra.combineMap decodeV1AssetMetadata
-                                    >> Maybe.map (\assets -> ( policyId, BytesMap.fromList assets ))
-                                )
+                        Maybe.Extra.combineMap decodeV1AssetMetadata policyMetadata
+                            |> Maybe.map (\assets -> ( policyId, BytesMap.fromList assets ))
 
                     else
                         Nothing
@@ -409,98 +432,82 @@ decodeV1Policy ( rawPolicyId, rawPolicyMetadata ) =
                 Nothing ->
                     Nothing
 
-        Nothing ->
+        _ ->
             Nothing
 
 
-decodeV1AssetMetadata : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes AssetName, AssetMetadata )
-decodeV1AssetMetadata ( rawAssetName, rawAssetMetadata ) =
-    case D.decode D.string rawAssetName of
-        Just assetNameText ->
+decodeV1AssetMetadata : ( Metadatum, Metadatum ) -> Maybe ( Bytes AssetName, AssetMetadata )
+decodeV1AssetMetadata pair =
+    case pair of
+        ( Metadatum.String assetNameText, metadatum ) ->
             let
                 assetName =
                     Bytes.fromText assetNameText
             in
             if MultiAsset.isValidAssetName assetName then
-                D.decode assetMetadataFromCbor rawAssetMetadata
+                assetMetadataFromMetadatum metadatum
                     |> Maybe.map (\metadata -> ( assetName, metadata ))
 
             else
                 Nothing
 
-        Nothing ->
+        _ ->
             Nothing
 
 
-decodeV2Policies : List ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe (BytesMap PolicyId PolicyMetadata)
+decodeV2Policies : List ( Metadatum, Metadatum ) -> Maybe (BytesMap PolicyId PolicyMetadata)
 decodeV2Policies pairs =
     Maybe.Extra.combineMap decodeV2Policy pairs
         |> Maybe.map BytesMap.fromList
 
 
-decodeV2Policy : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes PolicyId, PolicyMetadata )
-decodeV2Policy ( rawPolicyId, rawPolicyMetadata ) =
-    case D.decode (D.map Bytes.fromBytes D.bytes) rawPolicyId of
-        Just policyId ->
+decodeV2Policy : ( Metadatum, Metadatum ) -> Maybe ( Bytes PolicyId, PolicyMetadata )
+decodeV2Policy pair =
+    case pair of
+        ( Metadatum.Bytes bytes, Metadatum.Map policyMetadata ) ->
+            let
+                policyId =
+                    changeBytesType bytes
+            in
             if MultiAsset.isValidPolicyId policyId then
-                D.decode (D.associativeList D.raw D.raw) rawPolicyMetadata
-                    |> Maybe.andThen
-                        (Maybe.Extra.combineMap decodeV2AssetMetadata
-                            >> Maybe.map (\assets -> ( policyId, BytesMap.fromList assets ))
-                        )
+                Maybe.Extra.combineMap decodeV2AssetMetadata policyMetadata
+                    |> Maybe.map (\assets -> ( policyId, BytesMap.fromList assets ))
 
             else
                 Nothing
 
-        Nothing ->
+        _ ->
             Nothing
 
 
-decodeV2AssetMetadata : ( RawBytes.Bytes, RawBytes.Bytes ) -> Maybe ( Bytes AssetName, AssetMetadata )
-decodeV2AssetMetadata ( rawAssetName, rawAssetMetadata ) =
-    case D.decode (D.map Bytes.fromBytes D.bytes) rawAssetName of
-        Just assetName ->
+decodeV2AssetMetadata : ( Metadatum, Metadatum ) -> Maybe ( Bytes AssetName, AssetMetadata )
+decodeV2AssetMetadata pair =
+    case pair of
+        ( Metadatum.Bytes bytes, metadatum ) ->
+            let
+                assetName =
+                    changeBytesType bytes
+            in
             if MultiAsset.isValidAssetName assetName then
-                D.decode assetMetadataFromCbor rawAssetMetadata
+                assetMetadataFromMetadatum metadatum
                     |> Maybe.map (\metadata -> ( assetName, metadata ))
 
             else
                 Nothing
 
-        Nothing ->
+        _ ->
             Nothing
 
 
-{-| Unsafe text-string encoding of bytes.
+changeBytesType : Bytes a -> Bytes b
+changeBytesType =
+    Bytes.toBytes >> Bytes.fromBytes
 
-CIP-25 V1 asset names are CBOR text-string keys, but this module stores asset
-names as bytes, and the only way to instantiate V1 CIP-25 values is through
-decoding existing CBOR. This encoder emits those bytes as a CBOR text string,
-assuming they came from valid UTF-8 text.
 
+{-| Convert CIP-0025 asset metadata to transaction metadatum.
 -}
-v1AssetNameBytesToCbor : Bytes a -> E.Encoder
-v1AssetNameBytesToCbor bytes =
-    let
-        width =
-            Bytes.width bytes
-
-        header =
-            if width < 24 then
-                Bytes.fromU8 [ 0x60 + width ]
-
-            else
-                Bytes.fromU8 [ 0x78, width ]
-    in
-    Bytes.concat header bytes
-        |> Bytes.toBytes
-        |> E.raw
-
-
-{-| Encode CIP-0025 asset metadata to CBOR.
--}
-assetMetadataToCbor : AssetMetadata -> E.Encoder
-assetMetadataToCbor metadata =
+assetMetadataToMetadatum : AssetMetadata -> Metadatum
+assetMetadataToMetadatum metadata =
     let
         otherProps =
             metadata.otherProps
@@ -509,17 +516,27 @@ assetMetadataToCbor metadata =
                         not (List.member key [ "name", "image", "mediaType", "description", "files" ])
                     )
                 |> Dict.toList
-                |> List.map (Tuple.mapSecond Metadatum.toCbor)
+                |> List.map (Tuple.mapFirst Metadatum.String)
 
         optionalMediaType =
             metadata.mediaType
-                |> Maybe.map (\mediaType -> ( "mediaType", mediaType |> imageMimeToString |> stringToCbor ))
+                |> Maybe.map
+                    (\mediaType ->
+                        ( Metadatum.String "mediaType"
+                        , mediaType |> imageMimeToString |> stringToMetadatum
+                        )
+                    )
                 |> Maybe.map List.singleton
                 |> Maybe.withDefault []
 
         optionalDescription =
             metadata.description
-                |> Maybe.map (\description -> ( "description", stringToCbor description ))
+                |> Maybe.map
+                    (\description ->
+                        ( Metadatum.String "description"
+                        , stringToMetadatum description
+                        )
+                    )
                 |> Maybe.map List.singleton
                 |> Maybe.withDefault []
 
@@ -528,11 +545,14 @@ assetMetadataToCbor metadata =
                 []
 
             else
-                [ ( "files", E.list fileToCbor metadata.files ) ]
+                [ ( Metadatum.String "files"
+                  , Metadatum.List (List.map fileToMetadatum metadata.files)
+                  )
+                ]
     in
-    EE.associativeList E.string identity <|
-        [ ( "name", stringToCbor metadata.name )
-        , ( "image", stringToCbor metadata.image )
+    Metadatum.Map <|
+        [ ( Metadatum.String "name", stringToMetadatum metadata.name )
+        , ( Metadatum.String "image", stringToMetadatum metadata.image )
         ]
             ++ optionalMediaType
             ++ optionalDescription
@@ -540,91 +560,95 @@ assetMetadataToCbor metadata =
             ++ otherProps
 
 
-{-| Decode CIP-0025 asset metadata from CBOR.
--}
-assetMetadataFromCbor : D.Decoder AssetMetadata
-assetMetadataFromCbor =
+assetMetadataFromMetadatum : Metadatum -> Maybe AssetMetadata
+assetMetadataFromMetadatum metadatum =
     let
-        step ( key, raw ) fields =
-            case key of
-                "name" ->
-                    case D.decode stringFromCbor raw of
-                        Just name ->
-                            { fields | name = Just name }
+        step ( keyMetadatum, value ) fields =
+            case keyMetadatum of
+                Metadatum.String key ->
+                    case key of
+                        "name" ->
+                            case stringFromMetadatum value of
+                                Just name ->
+                                    { fields | name = Just name }
 
-                        Nothing ->
-                            { fields | invalid = True }
+                                Nothing ->
+                                    { fields | invalid = True }
 
-                "image" ->
-                    case D.decode stringFromCbor raw of
-                        Just image ->
-                            { fields | image = Just image }
+                        "image" ->
+                            case stringFromMetadatum value of
+                                Just image ->
+                                    { fields | image = Just image }
 
-                        Nothing ->
-                            { fields | invalid = True }
+                                Nothing ->
+                                    { fields | invalid = True }
 
-                "mediaType" ->
-                    case D.decode stringFromCbor raw |> Maybe.andThen imageMimeFromString of
-                        Just mediaType ->
-                            { fields | mediaType = Just mediaType }
+                        "mediaType" ->
+                            case stringFromMetadatum value |> Maybe.andThen imageMimeFromString of
+                                Just mediaType ->
+                                    { fields | mediaType = Just mediaType }
 
-                        Nothing ->
-                            { fields | invalid = True }
+                                Nothing ->
+                                    { fields | invalid = True }
 
-                "description" ->
-                    case D.decode stringFromCbor raw of
-                        Just description ->
-                            { fields | description = Just description }
+                        "description" ->
+                            case stringFromMetadatum value of
+                                Just description ->
+                                    { fields | description = Just description }
 
-                        Nothing ->
-                            { fields | invalid = True }
+                                Nothing ->
+                                    { fields | invalid = True }
 
-                "files" ->
-                    case D.decode (D.list fileFromCbor) raw of
-                        Just files ->
-                            { fields | files = files }
+                        "files" ->
+                            case value of
+                                Metadatum.List files ->
+                                    case Maybe.Extra.combineMap fileFromMetadatum files of
+                                        Just validFiles ->
+                                            { fields | files = validFiles }
 
-                        Nothing ->
-                            { fields | invalid = True }
+                                        Nothing ->
+                                            { fields | invalid = True }
 
-                _ ->
-                    case D.decode Metadatum.fromCbor raw of
-                        Just value ->
+                                _ ->
+                                    { fields | invalid = True }
+
+                        _ ->
                             { fields | otherProps = Dict.insert key value fields.otherProps }
 
-                        Nothing ->
-                            { fields | invalid = True }
+                _ ->
+                    { fields | invalid = True }
     in
-    D.associativeList D.string D.raw
-        |> D.andThen
-            (\pairs ->
-                let
-                    fields =
-                        List.foldl step
-                            { name = Nothing
-                            , image = Nothing
-                            , mediaType = Nothing
-                            , description = Nothing
-                            , files = []
-                            , otherProps = Dict.empty
-                            , invalid = False
-                            }
-                            pairs
-                in
-                case ( fields.invalid, fields.name, fields.image ) of
-                    ( False, Just name, Just image ) ->
-                        D.succeed
-                            { name = name
-                            , image = image
-                            , mediaType = fields.mediaType
-                            , description = fields.description
-                            , files = fields.files
-                            , otherProps = fields.otherProps
-                            }
+    case metadatum of
+        Metadatum.Map pairs ->
+            let
+                fields =
+                    List.foldl step
+                        { name = Nothing
+                        , image = Nothing
+                        , mediaType = Nothing
+                        , description = Nothing
+                        , files = []
+                        , otherProps = Dict.empty
+                        , invalid = False
+                        }
+                        pairs
+            in
+            case ( fields.invalid, fields.name, fields.image ) of
+                ( False, Just name, Just image ) ->
+                    Just
+                        { name = name
+                        , image = image
+                        , mediaType = fields.mediaType
+                        , description = fields.description
+                        , files = fields.files
+                        , otherProps = fields.otherProps
+                        }
 
-                    _ ->
-                        D.fail
-            )
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
 
 
 {-| Add a file to asset metadata.
@@ -656,79 +680,78 @@ file name mediaType src =
             )
 
 
-{-| Encode CIP-0025 file metadata to CBOR.
+{-| Convert CIP-0025 file metadata to transaction metadatum.
 -}
-fileToCbor : File -> E.Encoder
-fileToCbor file_ =
+fileToMetadatum : File -> Metadatum
+fileToMetadatum file_ =
     let
         otherProps =
             file_.otherProps
                 |> Dict.filter (\key _ -> key /= "name" && key /= "mediaType" && key /= "src")
                 |> Dict.toList
-                |> List.map (Tuple.mapSecond Metadatum.toCbor)
+                |> List.map (Tuple.mapFirst Metadatum.String)
     in
-    EE.associativeList E.string identity <|
-        [ ( "name", stringToCbor file_.name )
-        , ( "mediaType", file_.mediaType |> mimeTypeToString |> stringToCbor )
-        , ( "src", stringToCbor file_.src )
+    Metadatum.Map <|
+        [ ( Metadatum.String "name", stringToMetadatum file_.name )
+        , ( Metadatum.String "mediaType", file_.mediaType |> mimeTypeToString |> stringToMetadatum )
+        , ( Metadatum.String "src", stringToMetadatum file_.src )
         ]
             ++ otherProps
 
 
-{-| Decode CIP-0025 file metadata from CBOR.
--}
-fileFromCbor : D.Decoder File
-fileFromCbor =
+fileFromMetadatum : Metadatum -> Maybe File
+fileFromMetadatum metadatum =
     let
-        step ( key, raw ) fields =
-            case key of
-                "name" ->
-                    { fields | name = D.decode stringFromCbor raw }
+        step ( keyMetadatum, value ) fields =
+            case keyMetadatum of
+                Metadatum.String key ->
+                    case key of
+                        "name" ->
+                            { fields | name = stringFromMetadatum value }
 
-                "mediaType" ->
-                    { fields | mediaType = D.decode stringFromCbor raw |> Maybe.andThen mimeTypeFromString }
+                        "mediaType" ->
+                            { fields | mediaType = stringFromMetadatum value |> Maybe.andThen mimeTypeFromString }
 
-                "src" ->
-                    { fields | src = D.decode stringFromCbor raw }
-
-                _ ->
-                    case ( fields.otherProps, D.decode Metadatum.fromCbor raw ) of
-                        ( Just otherProps, Just value ) ->
-                            { fields | otherProps = Just (Dict.insert key value otherProps) }
+                        "src" ->
+                            { fields | src = stringFromMetadatum value }
 
                         _ ->
-                            { fields | otherProps = Nothing }
+                            { fields | otherProps = Dict.insert key value fields.otherProps }
+
+                _ ->
+                    { fields | invalid = True }
     in
-    D.associativeList D.string D.raw
-        |> D.andThen
-            (\pairs ->
-                let
-                    fields =
-                        List.foldl step
-                            { name = Nothing
-                            , mediaType = Nothing
-                            , src = Nothing
-                            , otherProps = Just Dict.empty
+    case metadatum of
+        Metadatum.Map pairs ->
+            let
+                fields =
+                    List.foldl step
+                        { name = Nothing
+                        , mediaType = Nothing
+                        , src = Nothing
+                        , otherProps = Dict.empty
+                        , invalid = False
+                        }
+                        pairs
+            in
+            if fields.invalid then
+                Nothing
+
+            else
+                case ( fields.name, fields.mediaType, fields.src ) of
+                    ( Just name, Just mediaType, Just src ) ->
+                        Just
+                            { name = name
+                            , mediaType = mediaType
+                            , src = src
+                            , otherProps = fields.otherProps
                             }
-                            pairs
-                in
-                case fields.name of
-                    Just name ->
-                        case ( fields.mediaType, fields.src, fields.otherProps ) of
-                            ( Just mediaType, Just src, Just otherProps ) ->
-                                D.succeed
-                                    { name = name
-                                    , mediaType = mediaType
-                                    , src = src
-                                    , otherProps = otherProps
-                                    }
 
-                            _ ->
-                                D.fail
+                    _ ->
+                        Nothing
 
-                    Nothing ->
-                        D.fail
-            )
+        _ ->
+            Nothing
 
 
 {-| Build a MIME media type from a full `type/subtype` string.
@@ -834,45 +857,53 @@ imageMimeToString (ImageMime subtype) =
     "image/" ++ subtype
 
 
-{-| Decode a CIP-0025 string.
-
-CIP-0025 strings are limited to 64 bytes. Longer string values are represented
-as a list of 64-byte string chunks.
-
--}
-stringFromCbor : D.Decoder String
-stringFromCbor =
+stringFromMetadatum : Metadatum -> Maybe String
+stringFromMetadatum metadatum =
     let
         boundedString string =
             if utf8Width string <= 64 then
-                D.succeed string
+                Just string
 
             else
-                D.fail
+                Nothing
     in
-    D.oneOf
-        [ D.string |> D.andThen boundedString
-        , D.list (D.string |> D.andThen boundedString)
-            |> D.map String.concat
-        ]
+    case metadatum of
+        Metadatum.String string ->
+            boundedString string
+
+        Metadatum.List chunks ->
+            chunks
+                |> Maybe.Extra.combineMap
+                    (\chunk ->
+                        case chunk of
+                            Metadatum.String string ->
+                                boundedString string
+
+                            _ ->
+                                Nothing
+                    )
+                |> Maybe.map String.concat
+
+        _ ->
+            Nothing
 
 
-{-| Encode a CIP-0025 string.
+{-| Convert a CIP-0025 string to transaction metadatum.
 
 Strings longer than 64 bytes are encoded as a list of 64-byte string chunks.
 
 -}
-stringToCbor : String -> E.Encoder
-stringToCbor string =
+stringToMetadatum : String -> Metadatum
+stringToMetadatum string =
     case chunksOfBytes 64 string of
         [] ->
-            E.string ""
+            Metadatum.String ""
 
         [ chunk ] ->
-            E.string chunk
+            Metadatum.String chunk
 
         chunks ->
-            E.list E.string chunks
+            Metadatum.List (List.map Metadatum.String chunks)
 
 
 utf8Width : String -> Int
