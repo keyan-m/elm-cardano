@@ -188,6 +188,7 @@ type TxOtherInfo
     | TxRequiredSigner (Bytes CredentialHash)
     | TxMetadata { tag : Natural, metadata : Metadatum }
     | TxTimeValidityRange { start : Int, end : Natural }
+    | TxCollateralWithoutReturn OutputReference
 
 
 {-| Configure fees manually or automatically for a transaction.
@@ -234,6 +235,7 @@ type TxFinalizationError
     | WitnessError Witness.Error
     | FailedToPerformCoinSelection CoinSelection.Error
     | CollateralSelectionError CoinSelection.Error
+    | InvalidCollateralWithoutReturn String
     | DuplicatedMetadataTags Int
     | IncorrectTimeValidityRange String
     | UplcVmError String
@@ -284,6 +286,9 @@ errorToString txFinalizationError =
 
         CollateralSelectionError coinSelectionError ->
             "Error while performing collateral selection: " ++ CoinSelection.errorToString coinSelectionError
+
+        InvalidCollateralWithoutReturn message ->
+            "Invalid collateral without return: " ++ message
 
         DuplicatedMetadataTags id ->
             "Duplicated metadata tag is not allowed: " ++ String.fromInt id
@@ -860,6 +865,45 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                             { selectedUtxos = List.foldl (\( ref, output ) -> Dict.Any.insert ref output) acc.selectedUtxos selectedUtxos
                             , changeOutputs = changeOutputs ++ acc.changeOutputs
                             }
+
+                        selectCollateral : Result TxFinalizationError CoinSelection.Selection
+                        selectCollateral =
+                            case processedOtherInfo.collateralWithoutReturn of
+                                Nothing ->
+                                    CoinSelection.collateral
+                                        (CoinSelection.CollateralContext (Dict.Any.toList localStateUtxos) collateralSources collateralAmount)
+                                        |> Result.mapError CollateralSelectionError
+
+                                Just reference ->
+                                    if Natural.isZero collateralAmount then
+                                        Ok { selectedUtxos = [], change = Nothing }
+
+                                    else
+                                        case Dict.Any.get reference localStateUtxos of
+                                            Nothing ->
+                                                Err <| InvalidCollateralWithoutReturn "the selected output is absent from local state"
+
+                                            Just output ->
+                                                if not <| Utxo.isAdaOnly output then
+                                                    Err <| InvalidCollateralWithoutReturn "the selected output must contain only ADA"
+
+                                                else if not <| Address.isShelleyWallet output.address then
+                                                    Err <| InvalidCollateralWithoutReturn "the selected output must be controlled by a verification key"
+
+                                                else if output.amount.lovelace |> Natural.isLessThan collateralAmount then
+                                                    Err <|
+                                                        InvalidCollateralWithoutReturn <|
+                                                            "the selected output contains "
+                                                                ++ Natural.toString output.amount.lovelace
+                                                                ++ " lovelace, but at least "
+                                                                ++ Natural.toString collateralAmount
+                                                                ++ " is required"
+
+                                                else
+                                                    Ok
+                                                        { selectedUtxos = [ ( reference, output ) ]
+                                                        , change = Nothing
+                                                        }
                     in
                     -- UTxO selection
                     Result.map2
@@ -871,9 +915,7 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                                 |> buildTx feeAmount collateralSelection processedIntents processedOtherInfo
                         )
                         (computeCoinSelection localStateUtxos roundFees processedIntents coinSelectionAlgo)
-                        (CoinSelection.collateral (CoinSelection.CollateralContext (Dict.Any.toList localStateUtxos) collateralSources collateralAmount)
-                            |> Result.mapError CollateralSelectionError
-                        )
+                        selectCollateral
 
                 computeRefScriptBytesForTx tx =
                     computeRefScriptBytes localStateUtxos (tx.body.referenceInputs ++ tx.body.inputs)
@@ -1842,6 +1884,7 @@ type alias ProcessedOtherInfo =
     , requiredSigners : List (Bytes CredentialHash)
     , metadata : List { tag : Natural, metadata : Metadatum }
     , timeValidityRange : Maybe { start : Int, end : Natural }
+    , collateralWithoutReturn : Maybe OutputReference
     }
 
 
@@ -1851,6 +1894,7 @@ noInfo =
     , requiredSigners = []
     , metadata = []
     , timeValidityRange = Nothing
+    , collateralWithoutReturn = Nothing
     }
 
 
@@ -1880,6 +1924,9 @@ processOtherInfo otherInfo =
                                         Just vr ->
                                             Just { start = max start vr.start, end = Natural.min end vr.end }
                             }
+
+                        TxCollateralWithoutReturn reference ->
+                            { acc | collateralWithoutReturn = Just reference }
                 )
                 noInfo
                 otherInfo
@@ -2191,10 +2238,10 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
                     )
                 |> List.filterMap identity
 
-        -- Look for inputs at addresses that will need signatures
+        -- Look for spending and collateral inputs at addresses that will need signatures.
         walletCredsInInputs : List (Bytes CredentialHash)
         walletCredsInInputs =
-            txContext.inputs
+            List.concat [ txContext.inputs, collateralSelection.selectedUtxos ]
                 |> List.filterMap (\( _, output ) -> Address.extractPubKeyHash output.address)
 
         -- Look for stake credentials needed for withdrawals
@@ -2305,13 +2352,14 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
                 |> Utxo.refDictFromList
                 |> Dict.Any.keys
 
-        collateralReturnAmount =
-            (Maybe.withDefault Value.zero collateralSelection.change).lovelace
-
         collateralReturn : Maybe Output
         collateralReturn =
-            List.head collateralSelection.selectedUtxos
-                |> Maybe.map (\( _, output ) -> Utxo.fromLovelace output.address collateralReturnAmount)
+            case ( List.head collateralSelection.selectedUtxos, collateralSelection.change ) of
+                ( Just ( _, output ), Just change ) ->
+                    Just <| Utxo.simpleOutput output.address change
+
+                _ ->
+                    Nothing
 
         totalCollateral : Maybe Int
         totalCollateral =
@@ -2321,7 +2369,14 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
             else
                 collateralSelection.selectedUtxos
                     |> List.foldl (\( _, o ) -> Natural.add o.amount.lovelace) Natural.zero
-                    |> (\sumCollateralInputs -> Natural.sub sumCollateralInputs collateralReturnAmount)
+                    |> (\sumCollateralInputs ->
+                            Natural.sub
+                                sumCollateralInputs
+                                (collateralSelection.change
+                                    |> Maybe.map .lovelace
+                                    |> Maybe.withDefault Natural.zero
+                                )
+                       )
                     |> Natural.toInt
                     |> Just
 
