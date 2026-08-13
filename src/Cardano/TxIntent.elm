@@ -135,6 +135,7 @@ type CertificateIntent
     = RegisterStake { delegator : Witness.Credential, deposit : Natural }
     | UnregisterStake { delegator : Witness.Credential, refund : Natural }
     | DelegateStake { delegator : Witness.Credential, poolId : Bytes Pool.Id }
+    | RegisterAndDelegateStake { delegator : Witness.Credential, poolId : Bytes Pool.Id, deposit : Natural }
       -- Pool management
     | RegisterPool { deposit : Natural } Pool.Params
     | RetirePool { poolId : Bytes Pool.Id, epoch : Natural }
@@ -679,6 +680,13 @@ containPlutusScripts txIntents =
             else
                 containPlutusScripts otherIntents
 
+        (IssueCertificate (RegisterAndDelegateStake { delegator })) :: otherIntents ->
+            if Witness.credentialIsPlutusScript delegator then
+                True
+
+            else
+                containPlutusScripts otherIntents
+
         (IssueCertificate (RegisterPool _ _)) :: otherIntents ->
             containPlutusScripts otherIntents
 
@@ -1211,6 +1219,14 @@ preProcessIntents txIntents =
                         (\keyCred -> StakeDelegationCert { delegator = VKeyHash keyCred, poolId = poolId })
                         (\scriptHash -> StakeDelegationCert { delegator = ScriptHash scriptHash, poolId = poolId })
                         { deposit = Natural.zero, refund = Natural.zero }
+                        delegator
+                        preProcessedIntents
+
+                IssueCertificate (RegisterAndDelegateStake { delegator, poolId, deposit }) ->
+                    preprocessCert
+                        (\keyCred -> StakeRegDelegCert { delegator = VKeyHash keyCred, poolId = poolId, deposit = deposit })
+                        (\scriptHash -> StakeRegDelegCert { delegator = ScriptHash scriptHash, poolId = poolId, deposit = deposit })
+                        { deposit = deposit, refund = Natural.zero }
                         delegator
                         preProcessedIntents
 
