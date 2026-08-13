@@ -1,6 +1,6 @@
 module Cardano.Redeemer exposing
     ( Redeemer, RedeemerTag(..), ExUnits
-    , ExUnitPrices, feeCost, decodeExUnitPrices, encodeExUnitPrices
+    , ExUnitPrices, feeCost, feeCostNatural, decodeExUnitPrices, encodeExUnitPrices
     , encodeAsArray, encodeTag, encodeExUnits
     , fromCborArray, tagFromCbor, exUnitsFromCbor
     )
@@ -8,7 +8,7 @@ module Cardano.Redeemer exposing
 {-| Redeemer
 
 @docs Redeemer, RedeemerTag, ExUnits
-@docs ExUnitPrices, feeCost, decodeExUnitPrices, encodeExUnitPrices
+@docs ExUnitPrices, feeCost, feeCostNatural, decodeExUnitPrices, encodeExUnitPrices
 @docs encodeAsArray, encodeTag, encodeExUnits
 @docs fromCborArray, tagFromCbor, exUnitsFromCbor
 
@@ -19,6 +19,7 @@ import Cardano.Utils exposing (RationalNumber, decodeRational, encodeRationalNum
 import Cbor.Decode as D
 import Cbor.Encode as E
 import Natural exposing (Natural)
+import RationalNat
 
 
 {-| Redeemer of a script, containing the data passed as argument to the validator.
@@ -62,18 +63,34 @@ type alias ExUnitPrices =
 -}
 feeCost : ExUnitPrices -> ExUnits -> Natural
 feeCost scriptExUnitPrice { mem, steps } =
+    feeCostNatural scriptExUnitPrice
+        { mem = Natural.fromSafeInt mem
+        , steps = Natural.fromSafeInt steps
+        }
+
+
+{-| Compute an execution fee from natural memory and step totals.
+
+Memory and step costs are added exactly before applying a single ceiling,
+as required by the ledger fee calculation.
+
+-}
+feeCostNatural : ExUnitPrices -> { mem : Natural, steps : Natural } -> Natural
+feeCostNatural { memPrice, stepPrice } { mem, steps } =
     let
         stepsCost =
-            Natural.mul (Natural.fromSafeInt steps) (Natural.fromSafeInt scriptExUnitPrice.stepPrice.numerator)
-                |> Natural.divBy (Natural.fromSafeInt scriptExUnitPrice.stepPrice.denominator)
-                |> Maybe.withDefault Natural.zero
+            { num = Natural.mul steps (Natural.fromSafeInt stepPrice.numerator)
+            , denom = Natural.fromSafeInt stepPrice.denominator
+            }
 
         memCost =
-            Natural.mul (Natural.fromSafeInt mem) (Natural.fromSafeInt scriptExUnitPrice.memPrice.numerator)
-                |> Natural.divBy (Natural.fromSafeInt scriptExUnitPrice.memPrice.denominator)
-                |> Maybe.withDefault Natural.zero
+            { num = Natural.mul mem (Natural.fromSafeInt memPrice.numerator)
+            , denom = Natural.fromSafeInt memPrice.denominator
+            }
     in
-    Natural.add stepsCost memCost
+    RationalNat.add stepsCost memCost
+        |> RationalNat.ceiling
+        |> Maybe.withDefault Natural.zero
 
 
 {-| CBOR decoder for [Redeemer].

@@ -21,6 +21,7 @@
         "Cardano.Metadatum",
         "Cardano.MultiAsset",
         "Cardano.Pool",
+        "Cardano.ProtocolParameters",
         "Cardano.Redeemer",
         "Cardano.Script",
         "Cardano.Transaction",

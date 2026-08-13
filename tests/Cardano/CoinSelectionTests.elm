@@ -3,8 +3,9 @@ module Cardano.CoinSelectionTests exposing (..)
 import Bytes.Comparable as Bytes
 import Cardano.Address as Address exposing (Address, NetworkId(..))
 import Cardano.CoinSelection as CoinSelection exposing (Error(..), inOrderedList, largestFirst)
-import Cardano.Utxo exposing (Output, OutputReference, fromLovelace)
+import Cardano.Utxo as Utxo exposing (Output, OutputReference, fromLovelace)
 import Cardano.Value as Value exposing (Value, onlyLovelace)
+import Dict.Any
 import Expect exposing (Expectation)
 import Fuzz exposing (Fuzzer)
 import Fuzz.Extra
@@ -51,6 +52,16 @@ suite =
             , test "insufficient funds" <| orderedInsufficientFundsMultiAssetTest
             , test "single utxo, single output, equal value" <| singleUtxoSingleOutputEqualValueMultiAssetTest inOrderedList
             , test "target zero, already selected output" <| targetZeroAlreadySelectedOutputMultiAssetTest inOrderedList
+            ]
+        , describe "per-address minimum Ada"
+            [ test "uses the supplied lovelace-per-UTxO-byte parameter" perAddressMinAdaTest
+            ]
+        , describe "collateral"
+            [ test "omits an exact-zero return" collateralZeroReturnTest
+            , test "continues selecting until a custom minimum-Ada return is valid" collateralCustomMinAdaTest
+            , test "honors the custom maximum collateral input count" collateralMaxInputCountTest
+            , test "prioritizes a sufficient fallback before reaching the input limit" collateralFallbackPriorityTest
+            , test "preserves native assets in the collateral return" collateralPreservesAssetsTest
             ]
         ]
 
@@ -217,6 +228,255 @@ targetZeroAlreadySelectedOutputTest algorithm _ =
     in
     algorithm maxInputCount context
         |> Expect.equal expectedResult
+
+
+perAddressMinAdaTest : () -> Expectation
+perAddressMinAdaTest _ =
+    let
+        addr =
+            selectionAddress
+
+        owedValue =
+            onlyLovelace (N.fromSafeInt 196)
+
+        config _ =
+            { selectionAlgo = inOrderedList
+            , normalizationAlgo = \{ target, owed } -> { normalizedTarget = target, normalizedOwed = owed }
+            , changeAlgo = \value -> [ value ]
+            }
+
+        contexts =
+            Address.dictFromList
+                [ ( addr
+                  , { availableUtxos = []
+                    , alreadySelectedUtxos = []
+                    , targetValue = Value.zero
+                    , alreadyOwed = owedValue
+                    }
+                  )
+                ]
+    in
+    case
+        ( CoinSelection.perAddressWith N.one config contexts
+        , CoinSelection.perAddressWith N.two config contexts
+        )
+    of
+        ( Ok lowCostSelections, Err _ ) ->
+            case Dict.Any.get addr lowCostSelections of
+                Just { changeOutputs } ->
+                    case changeOutputs of
+                        [ changeOutput ] ->
+                            Expect.equal owedValue changeOutput.amount
+
+                        _ ->
+                            Expect.fail "expected one change output at the supplied low minimum-Ada price"
+
+                Nothing ->
+                    Expect.fail "expected a selection for the requested address"
+
+        _ ->
+            Expect.fail "expected only the lower minimum-Ada price to accept the output"
+
+
+collateralZeroReturnTest : () -> Expectation
+collateralZeroReturnTest _ =
+    let
+        target =
+            N.fromSafeInt 2000000
+
+        context =
+            collateralContext
+                [ collateralOutput "exact" (onlyLovelace target) ]
+                target
+    in
+    case CoinSelection.collateralWith defaultCollateralConfig context of
+        Ok selection ->
+            Expect.equal ( 1, Nothing ) ( List.length selection.selectedUtxos, selection.change )
+
+        Err err ->
+            Expect.fail ("unexpected collateral selection error: " ++ Debug.toString err)
+
+
+collateralCustomMinAdaTest : () -> Expectation
+collateralCustomMinAdaTest _ =
+    let
+        target =
+            N.fromSafeInt 1000000
+
+        adaPerUtxoByte =
+            N.fromSafeInt 40000
+
+        minimumReturn =
+            minimumAdaOnlyReturn adaPerUtxoByte
+
+        candidateAmount =
+            N.add target (N.sub minimumReturn N.one)
+
+        context =
+            collateralContext
+                [ collateralOutput "first" (onlyLovelace candidateAmount)
+                , collateralOutput "second" (onlyLovelace candidateAmount)
+                ]
+                target
+
+        config =
+            { adaPerUtxoByte = adaPerUtxoByte
+            , maxInputCount = 2
+            }
+    in
+    case CoinSelection.collateralWith config context of
+        Ok selection ->
+            let
+                expectedChange =
+                    N.sub (N.mul N.two candidateAmount) target
+                        |> onlyLovelace
+            in
+            Expect.equal ( 2, Just expectedChange )
+                ( List.length selection.selectedUtxos, selection.change )
+
+        Err err ->
+            Expect.fail ("unexpected collateral selection error: " ++ Debug.toString err)
+
+
+collateralMaxInputCountTest : () -> Expectation
+collateralMaxInputCountTest _ =
+    let
+        target =
+            N.fromSafeInt 1000000
+
+        adaPerUtxoByte =
+            N.fromSafeInt 40000
+
+        candidateAmount =
+            N.add target (N.sub (minimumAdaOnlyReturn adaPerUtxoByte) N.one)
+
+        context =
+            collateralContext
+                [ collateralOutput "first" (onlyLovelace candidateAmount)
+                , collateralOutput "second" (onlyLovelace candidateAmount)
+                ]
+                target
+
+        config =
+            { adaPerUtxoByte = adaPerUtxoByte
+            , maxInputCount = 1
+            }
+    in
+    CoinSelection.collateralWith config context
+        |> Expect.equal (Err MaximumInputCountExceeded)
+
+
+collateralFallbackPriorityTest : () -> Expectation
+collateralFallbackPriorityTest _ =
+    let
+        target =
+            N.fromSafeInt 1000000
+
+        adaPerUtxoByte =
+            N.fromSafeInt 40000
+
+        minimumReturn =
+            minimumAdaOnlyReturn adaPerUtxoByte
+
+        invalidCandidateAmount =
+            N.add target (N.sub minimumReturn N.one)
+
+        validCandidateAmount =
+            N.add target minimumReturn
+
+        context =
+            collateralContext
+                [ collateralOutput "invalid-return" (onlyLovelace invalidCandidateAmount)
+                , collateralOutput "valid-return" (onlyLovelace validCandidateAmount)
+                ]
+                target
+
+        config =
+            { adaPerUtxoByte = adaPerUtxoByte
+            , maxInputCount = 1
+            }
+    in
+    CoinSelection.collateralWith config context
+        |> Expect.equal
+            (Ok
+                { selectedUtxos = [ collateralOutput "valid-return" (onlyLovelace validCandidateAmount) ]
+                , change = Just (onlyLovelace minimumReturn)
+                }
+            )
+
+
+collateralPreservesAssetsTest : () -> Expectation
+collateralPreservesAssetsTest _ =
+    let
+        tokenValue =
+            Value.onlyToken
+                (Bytes.dummy 28 "collateral-policy")
+                (Bytes.fromText "asset")
+                N.one
+
+        combinedTokens =
+            Value.add tokenValue tokenValue
+
+        target =
+            Utxo.minAdaWith
+                defaultCollateralConfig.adaPerUtxoByte
+                (Utxo.simpleOutput selectionAddress combinedTokens)
+
+        candidateValue =
+            Value.add (onlyLovelace target) tokenValue
+
+        context =
+            collateralContext
+                [ collateralOutput "asset-a" candidateValue
+                , collateralOutput "asset-b" candidateValue
+                ]
+                target
+    in
+    case CoinSelection.collateralWith defaultCollateralConfig context of
+        Ok selection ->
+            let
+                expectedChange =
+                    Value.add (onlyLovelace target) combinedTokens
+            in
+            Expect.equal ( 2, Just expectedChange )
+                ( List.length selection.selectedUtxos, selection.change )
+
+        Err err ->
+            Expect.fail ("unexpected collateral selection error: " ++ Debug.toString err)
+
+
+minimumAdaOnlyReturn : N.Natural -> N.Natural
+minimumAdaOnlyReturn adaPerUtxoByte =
+    Utxo.minAdaWith
+        adaPerUtxoByte
+        (Utxo.simpleOutput selectionAddress Value.zero)
+
+
+defaultCollateralConfig : { adaPerUtxoByte : N.Natural, maxInputCount : Int }
+defaultCollateralConfig =
+    { adaPerUtxoByte = N.fromSafeInt 4310
+    , maxInputCount = 3
+    }
+
+
+collateralContext : List ( OutputReference, Output ) -> N.Natural -> CoinSelection.CollateralContext
+collateralContext availableUtxos targetAmount =
+    { availableUtxos = availableUtxos
+    , allowedAddresses = Address.dictFromList [ ( selectionAddress, () ) ]
+    , targetAmount = targetAmount
+    }
+
+
+collateralOutput : String -> Value -> ( OutputReference, Output )
+collateralOutput label value =
+    ( OutputReference (Bytes.dummy 32 label) 0
+    , Utxo.simpleOutput selectionAddress value
+    )
+
+
+selectionAddress : Address
+selectionAddress =
+    Address.enterprise Testnet (Bytes.dummy 28 "selection")
 
 
 

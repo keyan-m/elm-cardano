@@ -1,8 +1,8 @@
 module Cardano.CoinSelection exposing
     ( Context, Error(..), errorToString, Selection, Algorithm
     , largestFirst, inOrderedList
-    , perAddress, PerAddressConfig, PerAddressContext
-    , CollateralContext, collateral
+    , perAddress, perAddressWith, PerAddressConfig, PerAddressContext
+    , CollateralContext, collateral, collateralWith
     )
 
 {-| Module `Cardano.CoinSelection` provides functionality for performing
@@ -23,12 +23,12 @@ selection algorithm as described in CIP2 (<https://cips.cardano.org/cips/cip2/>)
 
 # Per-address Selection
 
-@docs perAddress, PerAddressConfig, PerAddressContext
+@docs perAddress, perAddressWith, PerAddressConfig, PerAddressContext
 
 
 # Collateral Selection
 
-@docs CollateralContext, collateral
+@docs CollateralContext, collateral, collateralWith
 
 -}
 
@@ -371,7 +371,19 @@ perAddress :
     (Address -> PerAddressConfig)
     -> Address.Dict PerAddressContext
     -> Result Error (Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output })
-perAddress perAddressConfig perAddressContext =
+perAddress =
+    perAddressWith (N.fromSafeInt 4310)
+
+
+{-| Per-address coin selection using the supplied lovelace-per-UTxO-byte
+protocol parameter for minimum-Ada checks on change outputs.
+-}
+perAddressWith :
+    Natural
+    -> (Address -> PerAddressConfig)
+    -> Address.Dict PerAddressContext
+    -> Result Error (Address.Dict { selectedUtxos : List ( OutputReference, Output ), changeOutputs : List Output })
+perAddressWith adaPerUtxoByte perAddressConfig perAddressContext =
     let
         -- TODO: adjust at least with the number of different tokens in target Amount
         maxInputCount =
@@ -427,14 +439,14 @@ perAddress perAddressConfig perAddressContext =
                                 changeOutputs =
                                     List.map (\value -> Output addr value Nothing Nothing) splitChange
                             in
-                            case Result.Extra.combine (List.map Utxo.checkMinAda changeOutputs) of
+                            case Result.Extra.combine (List.map (Utxo.checkMinAdaWith adaPerUtxoByte) changeOutputs) of
                                 Ok _ ->
                                     Ok { selectedUtxos = selection.selectedUtxos, changeOutputs = changeOutputs }
 
                                 Err _ ->
                                     let
                                         missingMinAda output =
-                                            N.sub (Utxo.minAda output) output.amount.lovelace
+                                            N.sub (Utxo.minAdaWith adaPerUtxoByte output) output.amount.lovelace
 
                                         totalMissingAda =
                                             List.map missingMinAda changeOutputs
@@ -487,23 +499,32 @@ type alias CollateralContext =
 Only UTxOs at the provided whitelist of addresses are viable.
 UTxOs are picked following a prioritization list.
 
-  - First, prioritize UTxOs with only Ada in them,
-    and with >= ? Ada, but lowest amounts prioritized over higher amounts.
-  - Second, prioritize UTxOs with >= ? Ada, and that would cost minimal fees to add,
-    so basically no reference script, no datums, and minimal number of assets.
-  - Third, everything else, prioritized with >= ? Ada first,
-    and sorted by minimal fee cost associated.
-  - Finally, all the rest, sorted by "available" ada amounts (without min Ada),
-    with bigger available amounts prioritized over smaller amounts.
+  - First, prioritize Ada-only UTxOs that can individually cover the target and
+    produce a valid return under the supplied minimum-Ada parameter.
+  - Second, prioritize similarly valid asset-bearing UTxOs that have no datum or
+    reference script.
+  - Finally, try the remaining candidates in order of their exact available Ada.
+
+The complete selected return is always checked after selection.
 
 -}
 collateral : CollateralContext -> Result Error Selection
-collateral { availableUtxos, allowedAddresses, targetAmount } =
-    let
-        -- TODO: max inputs should come from a network parameter
-        maxInputCount =
-            3
+collateral =
+    collateralWith
+        { adaPerUtxoByte = N.fromSafeInt 4310
+        , maxInputCount = 3
+        }
 
+
+{-| Perform collateral selection with caller-provided minimum-Ada and maximum
+collateral-input parameters.
+-}
+collateralWith :
+    { adaPerUtxoByte : Natural, maxInputCount : Int }
+    -> CollateralContext
+    -> Result Error Selection
+collateralWith { adaPerUtxoByte, maxInputCount } { availableUtxos, allowedAddresses, targetAmount } =
+    let
         utxosInAllowedAddresses : List ( OutputReference, Output )
         utxosInAllowedAddresses =
             availableUtxos
@@ -518,85 +539,142 @@ collateral { availableUtxos, allowedAddresses, targetAmount } =
             List.partition (\( _, output ) -> Utxo.isAssetsOnly output)
                 notAdaOnly
 
-        -- Some threshold to guarantee that after collateral is spent,
-        -- there is still enough for an ada-only output (approximated at 1 ada)
-        adaOnlyThreshold =
-            N.add targetAmount (N.fromSafeInt 1000000)
-
-        -- Helper function to convert the lovelace amount in an output into
-        -- a comparable value, safe from JS float overflow.
-        -- By removing 5 decimals, we are guaranteed to have amounts
-        -- lower than 450B (45B ada total supply), which is way below JS max safe integer around 2^53
-        adaComparableAmount : Natural -> Float
-        adaComparableAmount lovelace =
-            lovelace
-                |> N.divBy (N.fromSafeInt 100000)
-                |> Maybe.withDefault N.zero
-                |> N.toInt
-                |> toFloat
-
-        -- First, prioritize UTxOs with only Ada in them,
-        -- and with >= ? Ada, but lowest amounts prioritized over higher amounts.
-        ( highAdaOnly, lowAdaOnly ) =
-            List.partition
-                (\( _, { amount } ) -> amount.lovelace |> N.isGreaterThan adaOnlyThreshold)
-                adaOnly
-
-        highAdaOnlyCount =
-            List.length highAdaOnly
-
-        highAdaOnlySorted =
-            List.sortBy (\( _, { amount } ) -> adaComparableAmount amount.lovelace) highAdaOnly
-
-        viableUtxos =
-            if highAdaOnlyCount >= maxInputCount then
-                highAdaOnlySorted
+        hasValidSingleReturn : Output -> Bool
+        hasValidSingleReturn output =
+            if output.amount.lovelace |> N.isLessThan targetAmount then
+                False
 
             else
-                -- Second, prioritize UTxOs with >= ? Ada, and that would cost minimal fees to add,
-                -- so basically no reference script, no datums, and minimal number of assets.
                 let
-                    -- Add another ada for priority UTxOs with other tokens
-                    assetOnlyThreshold =
-                        N.add adaOnlyThreshold (N.fromSafeInt 1000000)
-
-                    ( highAssetsOnly, lowAssetsOnly ) =
-                        List.partition
-                            (\( _, { amount } ) -> amount.lovelace |> N.isGreaterThan assetOnlyThreshold)
-                            assetsOnly
-
-                    highAssetsOnlyCount =
-                        List.length highAssetsOnly
-
-                    highAssetsOnlySorted =
-                        List.sortBy (Tuple.second >> Utxo.bytesWidth) highAssetsOnly
+                    collateralChange =
+                        Value.subtract output.amount (Value.onlyLovelace targetAmount)
+                            |> Value.normalize
                 in
-                if highAdaOnlyCount + highAssetsOnlyCount >= maxInputCount then
-                    List.concat [ highAdaOnlySorted, highAssetsOnlySorted ]
+                if collateralChange == Value.zero then
+                    True
 
                 else
-                    -- Third, everything else, prioritized with >= ? Ada first,
-                    -- and sorted by minimal fee cost associated.
-                    -- Finally, all the rest, sorted by "available" ada amounts (without min Ada),
-                    -- with bigger available amounts prioritized over smaller amounts.
-                    --
-                    -- TODO: Improve, but honestly it’s very low priority,
-                    -- so for now we just sort the rest by free ada (after removing min Ada).
+                    case Utxo.checkMinAdaWith adaPerUtxoByte (Utxo.simpleOutput output.address collateralChange) of
+                        Ok _ ->
+                            True
+
+                        Err _ ->
+                            False
+
+        compareLovelace ( _, first ) ( _, second ) =
+            N.compare first.amount.lovelace second.amount.lovelace
+
+        -- First, prioritize Ada-only UTxOs with an independently valid return,
+        -- with lower amounts before higher amounts.
+        ( validAdaOnly, remainingAdaOnly ) =
+            List.partition
+                (Tuple.second >> hasValidSingleReturn)
+                adaOnly
+
+        validAdaOnlySorted =
+            List.sortWith compareLovelace validAdaOnly
+
+        -- Second, prioritize independently valid asset-bearing UTxOs that have
+        -- no datum or reference script and therefore cost less to include.
+        -- Keep every candidate available: the input limit applies to the final selection,
+        -- and a lower-priority UTxO may be the only one that can produce valid change.
+        ( validAssetsOnly, remainingAssetsOnly ) =
+            List.partition
+                (Tuple.second >> hasValidSingleReturn)
+                assetsOnly
+
+        validAssetsOnlySorted =
+            List.sortBy (Tuple.second >> Utxo.bytesWidth) validAssetsOnly
+
+        -- Third, everything else, sorted by the Ada available after minimum Ada.
+        freeAda : Output -> Natural
+        freeAda output =
+            N.sub output.amount.lovelace (Utxo.minAdaWith adaPerUtxoByte output)
+
+        compareFreeAda ( _, first ) ( _, second ) =
+            N.compare (freeAda first) (freeAda second)
+
+        allOtherUtxos =
+            List.concat [ remainingAdaOnly, remainingAssetsOnly, notAssetsOnly ]
+
+        allOtherUtxosSorted =
+            List.sortWith compareFreeAda allOtherUtxos
+
+        viableUtxos =
+            List.concat [ validAdaOnlySorted, validAssetsOnlySorted, allOtherUtxosSorted ]
+
+        selectUntilValidReturn : Natural -> Result Error Selection
+        selectUntilValidReturn selectionTarget =
+            let
+                tryCandidateSuffixes candidates =
                     let
-                        freeAdaComparable : Output -> Float
-                        freeAdaComparable output =
-                            adaComparableAmount (Utxo.freeAda output)
-
-                        allOtherUtxos =
-                            List.concat [ lowAdaOnly, lowAssetsOnly, notAssetsOnly ]
-
-                        allOtherUtxosSorted =
-                            List.sortBy (Tuple.second >> freeAdaComparable) allOtherUtxos
+                        selectionResult =
+                            inOrderedList maxInputCount
+                                { alreadySelectedUtxos = []
+                                , targetAmount = Value.onlyLovelace selectionTarget
+                                , availableUtxos = candidates
+                                }
+                                |> Result.andThen validateReturn
                     in
-                    List.concat [ highAdaOnlySorted, highAssetsOnlySorted, allOtherUtxosSorted ]
+                    case ( selectionResult, candidates ) of
+                        ( Err MaximumInputCountExceeded, _ :: remainingCandidates ) ->
+                            case tryCandidateSuffixes remainingCandidates of
+                                Ok alternativeSelection ->
+                                    Ok alternativeSelection
+
+                                Err _ ->
+                                    selectionResult
+
+                        _ ->
+                            selectionResult
+            in
+            tryCandidateSuffixes viableUtxos
+
+        validateReturn : Selection -> Result Error Selection
+        validateReturn selection =
+            let
+                selectedAmount =
+                    Value.sum (List.map (Tuple.second >> .amount) selection.selectedUtxos)
+
+                collateralChange =
+                    Value.subtract selectedAmount (Value.onlyLovelace targetAmount)
+                        |> Value.normalize
+            in
+            if collateralChange == Value.zero then
+                Ok { selectedUtxos = selection.selectedUtxos, change = Nothing }
+
+            else
+                case List.head selection.selectedUtxos of
+                    Nothing ->
+                        Err
+                            (UTxOBalanceInsufficient
+                                { selectedUtxos = []
+                                , missingValue = Value.onlyLovelace targetAmount
+                                }
+                            )
+
+                    Just ( _, returnSource ) ->
+                        let
+                            returnOutput =
+                                Utxo.simpleOutput returnSource.address collateralChange
+                        in
+                        case Utxo.checkMinAdaWith adaPerUtxoByte returnOutput of
+                            Ok _ ->
+                                Ok
+                                    { selectedUtxos = selection.selectedUtxos
+                                    , change = Just collateralChange
+                                    }
+
+                            Err _ ->
+                                let
+                                    missingAda =
+                                        N.sub
+                                            (Utxo.minAdaWith adaPerUtxoByte returnOutput)
+                                            collateralChange.lovelace
+
+                                    nextSelectionTarget =
+                                        N.add selectedAmount.lovelace (N.max N.one missingAda)
+                                in
+                                selectUntilValidReturn nextSelectionTarget
     in
-    inOrderedList maxInputCount
-        { alreadySelectedUtxos = []
-        , targetAmount = Value.onlyLovelace targetAmount
-        , availableUtxos = viableUtxos
-        }
+    selectUntilValidReturn targetAmount

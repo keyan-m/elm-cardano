@@ -8,10 +8,12 @@ import Cardano.Data as Data
 import Cardano.Gov as Gov exposing (Drep(..), Vote(..), Voter(..), noParamUpdate)
 import Cardano.Metadatum as Metadatum
 import Cardano.MultiAsset as MultiAsset exposing (PolicyId)
+import Cardano.Pool as Pool
+import Cardano.ProtocolParameters as ProtocolParameters exposing (ProtocolParameters)
 import Cardano.Redeemer exposing (Redeemer)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction, newBody, newWitnessSet)
-import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), Fee(..), GovernanceState, SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
+import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), Fee(..), GovernanceState, ProtocolRuleError(..), SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
@@ -28,7 +30,583 @@ suite =
         [ okTxBuilding
         , failTxBuilding
         , balanceIntents
+        , protocolParameterIntegration
         ]
+
+
+protocolParameterIntegration : Test
+protocolParameterIntegration =
+    let
+        defaults =
+            ProtocolParameters.defaultProtocolParameters
+
+        stakeCredential =
+            WithKey (dummyCredentialHash "protocol-stake")
+
+        stakeAddress =
+            { networkId = Mainnet
+            , stakeCredential = VKeyHash (dummyCredentialHash "protocol-stake")
+            }
+
+        anchor =
+            { url = "https://example.com/protocol-parameters"
+            , dataHash = Bytes.dummy 32 "protocol-anchor"
+            }
+
+        poolParams : Pool.Params
+        poolParams =
+            { operator = Bytes.dummy 28 "protocol-pool"
+            , vrfKeyHash = Bytes.dummy 32 "protocol-vrf"
+            , pledge = Natural.zero
+            , cost = defaults.minPoolCost
+            , margin = { numerator = 0, denominator = 1 }
+            , rewardAccount = stakeAddress
+            , poolOwners = []
+            , relays = []
+            , poolMetadata = Nothing
+            }
+
+        invalidIntent intent =
+            finalizeWithProtocolParameters defaults
+                [ makeAdaOutput 80 testAddr.me 5 ]
+                echoRedeemers
+                twoAdaFee
+                []
+                [ intent ]
+    in
+    describe "Protocol-parameter finalization"
+        [ test "the default and explicit default finalizers are equivalent" <|
+            \_ ->
+                let
+                    localStateUtxos =
+                        [ makeAdaOutput 80 testAddr.me 5 ]
+
+                    defaultConfig =
+                        { govState = TxIntent.emptyGovernanceState
+                        , localStateUtxos = Utxo.refDictFromList localStateUtxos
+                        , coinSelectionAlgo = CoinSelection.largestFirst
+                        , evalScriptsCosts = echoRedeemers
+                        , costModels = defaults.costModels
+                        }
+                in
+                Expect.equal
+                    (finalizeAdvanced defaultConfig autoFee [] [])
+                    (finalizeWithProtocolParameters defaults localStateUtxos echoRedeemers autoFee [] [])
+        , test "automatic fees exactly match the supplied protocol parameters" <|
+            \_ ->
+                let
+                    protocolParameters =
+                        { defaults
+                            | minFeeA = Natural.fromSafeInt 7
+                            , minFeeB = Natural.fromSafeInt 400000
+                        }
+                in
+                case finalizeWithProtocolParameters protocolParameters [ makeAdaOutput 81 testAddr.me 5 ] echoRedeemers autoFee [] [] of
+                    Err error ->
+                        Expect.fail ("Expected automatic finalization to succeed: " ++ Debug.toString error)
+
+                    Ok { tx } ->
+                        let
+                            defaultFeeParameters =
+                                Transaction.defaultTxFeeParams
+
+                            defaultRefScriptFeeParameters =
+                                defaultFeeParameters.refScriptFeeParams
+
+                            feeParameters =
+                                { defaultFeeParameters
+                                    | baseFee = protocolParameters.minFeeB
+                                    , feePerByte = protocolParameters.minFeeA
+                                    , scriptExUnitPrice = protocolParameters.executionCosts
+                                    , refScriptFeeParams =
+                                        { defaultRefScriptFeeParameters
+                                            | minFeeRefScriptCostPerByte = protocolParameters.minFeeRefScriptCostPerByte
+                                        }
+                                }
+
+                            witnessSet =
+                                tx.witnessSet
+
+                            placeholderSignedTx =
+                                { tx
+                                    | witnessSet =
+                                        { witnessSet
+                                            | vkeywitness =
+                                                Just [ { vkey = Bytes.dummy 32 "", signature = Bytes.dummy 64 "" } ]
+                                        }
+                                }
+
+                            computedFee =
+                                Transaction.computeFees feeParameters { refScriptBytes = 0 } placeholderSignedTx
+                                    |> (\{ txSizeFee, scriptExecFee, refScriptSizeFee } ->
+                                            Natural.add txSizeFee scriptExecFee
+                                                |> Natural.add refScriptSizeFee
+                                       )
+                        in
+                        Expect.equal computedFee tx.body.fee
+        , test "a sufficient manual fee is preserved exactly" <|
+            \_ ->
+                let
+                    protocolParameters =
+                        { defaults
+                            | minFeeA = Natural.one
+                            , minFeeB = Natural.one
+                        }
+                in
+                case finalizeWithProtocolParameters protocolParameters [ makeAdaOutput 82 testAddr.me 5 ] echoRedeemers twoAdaFee [] [] of
+                    Err error ->
+                        Expect.fail ("Expected manual finalization to succeed: " ++ Debug.toString error)
+
+                    Ok { tx } ->
+                        Expect.equal (ada 2) tx.body.fee
+        , test "stake registration rejects a mismatched deposit" <|
+            \_ ->
+                invalidIntent
+                    (IssueCertificate <| RegisterStake { delegator = stakeCredential, deposit = Natural.zero })
+                    |> expectProtocolRule
+                        (StakeDepositMismatch { expected = defaults.keyDeposit, actual = Natural.zero })
+        , test "combined stake registration and delegation rejects a mismatched deposit" <|
+            \_ ->
+                invalidIntent
+                    (IssueCertificate <|
+                        RegisterAndDelegateStake
+                            { delegator = stakeCredential
+                            , poolId = Bytes.dummy 28 "protocol-pool"
+                            , deposit = Natural.zero
+                            }
+                    )
+                    |> expectProtocolRule
+                        (StakeDepositMismatch { expected = defaults.keyDeposit, actual = Natural.zero })
+        , test "DRep registration rejects a mismatched deposit" <|
+            \_ ->
+                invalidIntent
+                    (IssueCertificate <| RegisterDrep { drep = stakeCredential, deposit = Natural.zero, info = Nothing })
+                    |> expectProtocolRule
+                        (DrepDepositMismatch { expected = defaults.drepDeposit, actual = Natural.zero })
+        , test "governance proposals reject a mismatched deposit" <|
+            \_ ->
+                invalidIntent
+                    (Propose
+                        { govAction = Info
+                        , offchainInfo = anchor
+                        , deposit = Natural.zero
+                        , depositReturnAccount = stakeAddress
+                        }
+                    )
+                    |> expectProtocolRule
+                        (GovernanceActionDepositMismatch { expected = defaults.governanceActionDeposit, actual = Natural.zero })
+        , test "pool registration rejects an invalid non-zero deposit" <|
+            \_ ->
+                invalidIntent
+                    (IssueCertificate <| RegisterPool { deposit = Natural.one } poolParams)
+                    |> expectProtocolRule
+                        (PoolDepositMismatch { expected = defaults.poolDeposit, actual = Natural.one })
+        , test "pool registration rejects cost below the protocol minimum" <|
+            \_ ->
+                let
+                    belowMinimum =
+                        { poolParams | cost = Natural.sub defaults.minPoolCost Natural.one }
+                in
+                invalidIntent
+                    (IssueCertificate <| RegisterPool { deposit = Natural.zero } belowMinimum)
+                    |> expectProtocolRule
+                        (PoolCostBelowMinimum { minimum = defaults.minPoolCost, actual = belowMinimum.cost })
+        , test "deposit smart constructors use the supplied protocol parameters" <|
+            \_ ->
+                ()
+                    |> Expect.all
+                        [ \_ ->
+                            Expect.equal
+                                (RegisterStake { delegator = stakeCredential, deposit = defaults.keyDeposit })
+                                (TxIntent.registerStakeWithProtocolDeposit defaults stakeCredential)
+                        , \_ ->
+                            Expect.equal
+                                (RegisterDrep { drep = stakeCredential, deposit = defaults.drepDeposit, info = Just anchor })
+                                (TxIntent.registerDrepWithProtocolDeposit defaults { drep = stakeCredential, info = Just anchor })
+                        , \_ ->
+                            Expect.equal
+                                { govAction = Info
+                                , offchainInfo = anchor
+                                , deposit = defaults.governanceActionDeposit
+                                , depositReturnAccount = stakeAddress
+                                }
+                                (TxIntent.proposalWithProtocolDeposit defaults
+                                    { govAction = Info
+                                    , offchainInfo = anchor
+                                    , depositReturnAccount = stakeAddress
+                                    }
+                                )
+                        , \_ ->
+                            Expect.equal
+                                (RegisterPool { deposit = defaults.poolDeposit } poolParams)
+                                (TxIntent.registerNewPool defaults poolParams)
+                        , \_ ->
+                            Expect.equal
+                                (RegisterPool { deposit = Natural.zero } poolParams)
+                                (TxIntent.updatePool poolParams)
+                        ]
+        , test "custom active cost models are used in the script-data hash" <|
+            \_ ->
+                let
+                    defaultCostModels =
+                        defaults.costModels
+
+                    customCostModels =
+                        { defaultCostModels
+                            | plutusV3 = Maybe.map (\model -> 999999 :: List.drop 1 model) defaultCostModels.plutusV3
+                        }
+
+                    protocolParameters =
+                        { defaults | costModels = customCostModels }
+                in
+                case finalizeWithProtocolParameters protocolParameters protocolScriptFixture.localStateUtxos echoRedeemers twoAdaFee [] protocolScriptFixture.txIntents of
+                    Err error ->
+                        Expect.fail ("Expected script finalization to succeed: " ++ Debug.toString error)
+
+                    Ok { tx } ->
+                        let
+                            activeCostModels =
+                                { plutusV1 = Nothing
+                                , plutusV2 = Nothing
+                                , plutusV3 = customCostModels.plutusV3
+                                }
+                        in
+                        Expect.equal (Just <| Transaction.hashScriptData activeCostModels tx) tx.body.scriptDataHash
+        , test "an active Plutus version requires a cost model" <|
+            \_ ->
+                let
+                    defaultCostModels =
+                        defaults.costModels
+
+                    protocolParameters =
+                        { defaults
+                            | costModels = { defaultCostModels | plutusV3 = Nothing }
+                        }
+                in
+                finalizeWithProtocolParameters protocolParameters protocolScriptFixture.localStateUtxos echoRedeemers twoAdaFee [] protocolScriptFixture.txIntents
+                    |> expectProtocolRule (MissingCostModel PlutusV3)
+        , test "the final transaction-size limit is enforced" <|
+            \_ ->
+                finalizeWithProtocolParameters
+                    { defaults | maxTransactionSize = 1 }
+                    [ makeAdaOutput 83 testAddr.me 5 ]
+                    echoRedeemers
+                    twoAdaFee
+                    []
+                    []
+                    |> expectProtocolRuleMatching
+                        (\protocolError ->
+                            case protocolError of
+                                TransactionSizeExceeded { maximum, actual } ->
+                                    if maximum == 1 && actual > maximum then
+                                        Expect.pass
+
+                                    else
+                                        Expect.fail "Unexpected transaction-size bounds"
+
+                                _ ->
+                                    Expect.fail ("Expected a transaction-size error: " ++ Debug.toString protocolError)
+                        )
+        , test "the final output-value-size limit is enforced" <|
+            \_ ->
+                finalizeWithProtocolParameters
+                    { defaults | maxValueSize = 1 }
+                    [ makeAdaOutput 84 testAddr.me 5 ]
+                    echoRedeemers
+                    twoAdaFee
+                    []
+                    []
+                    |> expectProtocolRuleMatching
+                        (\protocolError ->
+                            case protocolError of
+                                OutputValueSizeExceeded { maximum, actual } ->
+                                    if maximum == 1 && actual > maximum then
+                                        Expect.pass
+
+                                    else
+                                        Expect.fail "Unexpected output-value-size bounds"
+
+                                _ ->
+                                    Expect.fail ("Expected an output-value-size error: " ++ Debug.toString protocolError)
+                        )
+        , test "the final execution-unit limit is enforced" <|
+            \_ ->
+                let
+                    overBudget _ tx =
+                        tx.witnessSet.redeemer
+                            |> Maybe.withDefault []
+                            |> List.map
+                                (\redeemer ->
+                                    { redeemer
+                                        | exUnits =
+                                            { mem = defaults.maxTxExUnits.mem + 1
+                                            , steps = 0
+                                            }
+                                    }
+                                )
+                            |> Ok
+                in
+                finalizeWithProtocolParameters defaults protocolScriptFixture.localStateUtxos overBudget twoAdaFee [] protocolScriptFixture.txIntents
+                    |> expectProtocolRuleMatching
+                        (\protocolError ->
+                            case protocolError of
+                                TransactionExecutionUnitsExceeded { maximum, actual } ->
+                                    if maximum == defaults.maxTxExUnits && (actual.mem |> Natural.isGreaterThan (Natural.fromSafeInt maximum.mem)) then
+                                        Expect.pass
+
+                                    else
+                                        Expect.fail "Unexpected execution-unit bounds"
+
+                                _ ->
+                                    Expect.fail ("Expected an execution-unit error: " ++ Debug.toString protocolError)
+                        )
+        , test "minimum Ada is checked on context-dependent final outputs" <|
+            \_ ->
+                let
+                    contextDependentOutput txContext =
+                        if List.isEmpty txContext.inputs then
+                            Utxo.fromLovelace testAddr.you (ada 2)
+
+                        else
+                            Utxo.fromLovelace testAddr.you Natural.one
+
+                    intents =
+                        [ Spend <|
+                            FromWallet
+                                { address = testAddr.me
+                                , value = Value.onlyLovelace (ada 2)
+                                , guaranteedUtxos = []
+                                }
+                        , SendToOutputAdvanced contextDependentOutput
+                        ]
+                in
+                case finalizeWithProtocolParameters defaults [ makeAdaOutput 85 testAddr.me 6 ] echoRedeemers twoAdaFee [] intents of
+                    Err (NotEnoughMinAda _) ->
+                        Expect.pass
+
+                    Err error ->
+                        Expect.fail ("Expected a minimum-Ada error: " ++ Debug.toString error)
+
+                    Ok _ ->
+                        Expect.fail "Expected final minimum-Ada validation to fail"
+        , test "the collateral input-count parameter is enforced during selection" <|
+            \_ ->
+                case finalizeWithProtocolParameters { defaults | maxCollateralInputs = 0 } protocolScriptFixture.localStateUtxos echoRedeemers twoAdaFee [] protocolScriptFixture.txIntents of
+                    Err (CollateralSelectionError MaximumInputCountExceeded) ->
+                        Expect.pass
+
+                    Err error ->
+                        Expect.fail ("Expected a collateral input-count error: " ++ Debug.toString error)
+
+                    Ok _ ->
+                        Expect.fail "Expected collateral selection to fail"
+        , test "a collateral-only payment credential is an expected signer" <|
+            \_ ->
+                let
+                    feeInput =
+                        makeRef "protocol-fee-input" 0
+
+                    collateralInput =
+                        makeRef "protocol-collateral-input" 0
+
+                    scriptInput =
+                        makeRef "protocol-signer-script-input" 0
+
+                    fee =
+                        ManualFee
+                            [ { paymentSource = testAddr.me, exactFeeAmount = ada 2 }
+                            , { paymentSource = testAddr.you, exactFeeAmount = Natural.zero }
+                            ]
+
+                    localStateUtxos =
+                        [ ( feeInput, Utxo.fromLovelace testAddr.me (ada 2) )
+                        , ( collateralInput, Utxo.fromLovelace testAddr.you (ada 5) )
+                        , ( scriptInput, Utxo.fromLovelace indexedScript.address (ada 4) )
+                        ]
+
+                    intents =
+                        [ Spend <|
+                            FromPlutusScript
+                                { spentInput = scriptInput
+                                , datumWitness = Nothing
+                                , plutusScriptWitness = indexedScript.witness 0
+                                }
+                        , SendTo testAddr.me (Value.onlyLovelace <| ada 4)
+                        ]
+                in
+                case finalizeWithProtocolParameters defaults localStateUtxos echoRedeemers fee [] intents of
+                    Err error ->
+                        Expect.fail ("Expected collateral finalization to succeed: " ++ Debug.toString error)
+
+                    Ok finalized ->
+                        finalized
+                            |> Expect.all
+                                [ \{ tx } -> Expect.equal [ collateralInput ] tx.body.collateral
+                                , \{ expectedSignatures } ->
+                                    Expect.equal True (List.member (dummyCredentialHash "key-you") expectedSignatures)
+                                ]
+        , test "collateral return values are checked against the value-size limit" <|
+            \_ ->
+                let
+                    feeRef =
+                        makeRef "protocol-collateral-fee" 0
+
+                    tokenRef =
+                        makeRef "protocol-token-collateral" 0
+
+                    scriptRef =
+                        makeRef "protocol-collateral-script" 0
+
+                    tokenCollateral =
+                        { address = testAddr.me
+                        , amount =
+                            Value.add
+                                (Value.onlyLovelace <| ada 8)
+                                (Value.onlyToken cat.policyId cat.assetName Natural.one)
+                        , datumOption = Nothing
+                        , referenceScript = Nothing
+                        }
+
+                    localStateUtxos =
+                        [ ( feeRef, Utxo.fromLovelace testAddr.me (ada 2) )
+                        , ( tokenRef, tokenCollateral )
+                        , ( scriptRef, Utxo.fromLovelace indexedScript.address (ada 4) )
+                        ]
+
+                    intents =
+                        [ Spend <|
+                            FromWallet
+                                { address = testAddr.me
+                                , value = Value.zero
+                                , guaranteedUtxos = [ feeRef ]
+                                }
+                        , Spend <|
+                            FromPlutusScript
+                                { spentInput = scriptRef
+                                , datumWitness = Nothing
+                                , plutusScriptWitness = indexedScript.witness 0
+                                }
+                        , SendTo testAddr.me (Value.onlyLovelace <| ada 4)
+                        ]
+                in
+                finalizeWithProtocolParameters { defaults | maxValueSize = 10 } localStateUtxos echoRedeemers twoAdaFee [] intents
+                    |> expectProtocolRuleMatching
+                        (\protocolError ->
+                            case protocolError of
+                                CollateralReturnValueSizeExceeded { maximum, actual } ->
+                                    if maximum == 10 && actual > maximum then
+                                        Expect.pass
+
+                                    else
+                                        Expect.fail "Unexpected collateral-return value-size bounds"
+
+                                _ ->
+                                    Expect.fail ("Expected a collateral-return value-size error: " ++ Debug.toString protocolError)
+                        )
+        , test "the fixed Conway reference-script transaction limit is enforced" <|
+            \_ ->
+                let
+                    referenceInput =
+                        makeRef "oversized-reference-script" 0
+
+                    oversizedScript =
+                        Script.plutusScriptFromBytes PlutusV3 (Bytes.dummy 204801 "oversized-reference-script")
+
+                    referenceOutput =
+                        { address = testAddr.you
+                        , amount = Value.onlyLovelace (ada 2)
+                        , datumOption = Nothing
+                        , referenceScript = Just <| Script.refFromScript (Script.Plutus oversizedScript)
+                        }
+
+                    largeFee =
+                        ManualFee [ { paymentSource = testAddr.me, exactFeeAmount = ada 100 } ]
+                in
+                finalizeWithProtocolParameters defaults
+                    [ makeAdaOutput 86 testAddr.me 200, ( referenceInput, referenceOutput ) ]
+                    echoRedeemers
+                    largeFee
+                    [ TxReferenceInput referenceInput ]
+                    []
+                    |> expectProtocolRuleMatching
+                        (\protocolError ->
+                            case protocolError of
+                                ReferenceScriptSizeExceeded { maximum, actual } ->
+                                    if maximum == 204800 && actual > maximum then
+                                        Expect.pass
+
+                                    else
+                                        Expect.fail "Unexpected reference-script size bounds"
+
+                                _ ->
+                                    Expect.fail ("Expected a reference-script size error: " ++ Debug.toString protocolError)
+                        )
+        ]
+
+
+finalizeWithProtocolParameters :
+    ProtocolParameters
+    -> List ( OutputReference, Output )
+    -> (Utxo.RefDict Output -> Transaction -> Result String (List Redeemer))
+    -> Fee
+    -> List TxOtherInfo
+    -> List TxIntent
+    -> Result TxFinalizationError TxFinalized
+finalizeWithProtocolParameters protocolParameters localStateUtxos evalScriptsCosts fee txOtherInfo txIntents =
+    TxIntent.finalizeAdvancedWithProtocolParameters protocolParameters
+        { govState = TxIntent.emptyGovernanceState
+        , localStateUtxos = Utxo.refDictFromList localStateUtxos
+        , coinSelectionAlgo = CoinSelection.largestFirst
+        , evalScriptsCosts = evalScriptsCosts
+        }
+        fee
+        txOtherInfo
+        txIntents
+
+
+echoRedeemers : Utxo.RefDict Output -> Transaction -> Result String (List Redeemer)
+echoRedeemers _ tx =
+    Ok (Maybe.withDefault [] tx.witnessSet.redeemer)
+
+
+expectProtocolRule : ProtocolRuleError -> Result TxFinalizationError TxFinalized -> Expectation
+expectProtocolRule expected =
+    expectProtocolRuleMatching (Expect.equal expected)
+
+
+expectProtocolRuleMatching : (ProtocolRuleError -> Expectation) -> Result TxFinalizationError TxFinalized -> Expectation
+expectProtocolRuleMatching expectation result =
+    case result of
+        Err (ProtocolRuleViolation protocolError) ->
+            expectation protocolError
+
+        Err error ->
+            Expect.fail ("Expected a protocol-rule error: " ++ Debug.toString error)
+
+        Ok _ ->
+            Expect.fail "Expected protocol-rule validation to fail"
+
+
+protocolScriptFixture =
+    let
+        scriptInput =
+            makeRef "protocol-script-input" 0
+    in
+    { localStateUtxos =
+        [ makeAdaOutput 87 testAddr.me 14
+        , makeAdaOutput 88 testAddr.me 8
+        , ( scriptInput, Utxo.fromLovelace indexedScript.address (ada 4) )
+        ]
+    , txIntents =
+        [ Spend <|
+            FromPlutusScript
+                { spentInput = scriptInput
+                , datumWitness = Nothing
+                , plutusScriptWitness = indexedScript.witness 0
+                }
+        , SendTo testAddr.me (Value.onlyLovelace <| ada 4)
+        ]
+    }
 
 
 balanceIntents : Test
@@ -576,18 +1154,27 @@ okTxBuilding =
             )
         , okTxTest "builds combined stake registration and delegation with a Plutus credential"
             { govState = TxIntent.emptyGovernanceState
-            , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
+            , localStateUtxos =
+                [ makeAdaOutput 0 testAddr.me 5
+                , makeAdaOutput 89 testAddr.me 5
+                ]
             , evalScriptsCosts = Uplc.evalScriptsCosts Uplc.defaultVmConfig
             , fee = twoAdaFee
             , txOtherInfo = []
             , txIntents =
-                [ IssueCertificate <|
+                [ Spend <|
+                    FromWallet
+                        { address = testAddr.me
+                        , value = Value.onlyLovelace (ada 2)
+                        , guaranteedUtxos = []
+                        }
+                , IssueCertificate <|
                     RegisterAndDelegateStake
                         { delegator =
                             WithScript indexedScript.hash <|
                                 Witness.Plutus (indexedScript.witness 0)
                         , poolId = Bytes.dummy 28 "poolId"
-                        , deposit = Natural.zero
+                        , deposit = ada 2
                         }
                 ]
             }
@@ -625,10 +1212,12 @@ okTxBuilding =
             guardrailsScriptBytes =
                 Bytes.fromHexUnchecked "5908510101003232323232323232323232323232323232323232323232323232323232323232323232323232323232259323255333573466e1d20000011180098111bab357426ae88d55cf00104554ccd5cd19b87480100044600422c6aae74004dd51aba1357446ae88d55cf1baa3255333573466e1d200a35573a002226ae84d5d11aab9e00111637546ae84d5d11aba235573c6ea800642b26006003149a2c8a4c301f801c0052000c00e0070018016006901e4070c00e003000c00d20d00fc000c0003003800a4005801c00e003002c00d20c09a0c80e1801c006001801a4101b5881380018000600700148013003801c006005801a410100078001801c006001801a4101001f8001800060070014801b0038018096007001800600690404002600060001801c0052008c00e006025801c006001801a41209d8001800060070014802b003801c006005801a410112f501c3003800c00300348202b7881300030000c00e00290066007003800c00b003482032ad7b806038403060070014803b00380180960003003800a4021801c00e003002c00d20f40380e1801c006001801a41403f800100a0c00e0029009600f0030078040c00e002900a600f003800c00b003301a483403e01a600700180060066034904801e00060001801c0052016c01e00600f801c006001801980c2402900e30000c00e002901060070030128060c00e00290116007003800c00b003483c0ba03860070018006006906432e00040283003800a40498003003800a404d802c00e00f003800c00b003301a480cb0003003800c003003301a4802b00030001801c01e0070018016006603490605c0160006007001800600660349048276000600030000c00e0029014600b003801c00c04b003800c00300348203a2489b00030001801c00e006025801c006001801a4101b11dc2df80018000c0003003800a4055802c00e007003012c00e003000c00d2080b8b872c000c0006007003801809600700180060069040607e4155016000600030000c00e00290166007003012c00e003000c00d2080c001c000c0003003800a405d801c00e003002c00d20c80180e1801c006001801a412007800100a0c00e00290186007003013c0006007001480cb005801801e006003801800e00600500403003800a4069802c00c00f003001c00c007003803c00e003002c00c05300333023480692028c0004014c00c00b003003c00c00f003003c00e00f003800c00b00301480590052008003003800a406d801c00e003002c00d2000c00d2006c00060070018006006900a600060001801c0052038c00e007001801600690006006901260003003800c003003483281300020141801c005203ac00e006027801c006001801a403d800180006007001480f3003801804e00700180060069040404af3c4e302600060001801c005203ec00e006013801c006001801a4101416f0fd20b80018000600700148103003801c006005801a403501c3003800c0030034812b00030000c00e0029021600f003800c00a01ac00e003000c00ccc08d20d00f4800b00030000c0000000000803c00c016008401e006009801c006001801807e0060298000c000401e006007801c0060018018074020c000400e00f003800c00b003010c000802180020070018006006019801805e0003000400600580180760060138000800c00b00330134805200c400e00300080330004006005801a4001801a410112f58000801c00600901260008019806a40118002007001800600690404a75ee01e00060008018046000801801e000300c4832004c025201430094800a0030028052003002c00d2002c000300648010c0092002300748028c0312000300b48018c0292012300948008c0212066801a40018000c0192008300a2233335573e00250002801994004d55ce800cd55cf0008d5d08014c00cd5d10011263009222532900389800a4d2219002912c80344c01526910c80148964cc04cdd68010034564cc03801400626601800e0071801226601800e01518010096400a3000910c008600444002600244004a664600200244246466004460044460040064600444600200646a660080080066a00600224446600644b20051800484ccc02600244666ae68cdc3801000c00200500a91199ab9a33710004003000801488ccd5cd19b89002001800400a44666ae68cdc4801000c00a00122333573466e20008006005000912a999ab9a3371200400222002220052255333573466e2400800444008440040026eb400a42660080026eb000a4264666015001229002914801c8954ccd5cd19b8700400211333573466e1c00c006001002118011229002914801c88cc044cdc100200099b82002003245200522900391199ab9a3371066e08010004cdc1001001c002004403245200522900391199ab9a3371266e08010004cdc1001001c00a00048a400a45200722333573466e20cdc100200099b820020038014000912c99807001000c40062004912c99807001000c400a2002001199919ab9a357466ae880048cc028dd69aba1003375a6ae84008d5d1000934000dd60010a40064666ae68d5d1800c0020052225933006003357420031330050023574400318010600a444aa666ae68cdc3a400000222c22aa666ae68cdc4000a4000226600666e05200000233702900000088994004cdc2001800ccdc20010008cc010008004c01088954ccd5cd19b87480000044400844cc00c004cdc300100091119803112c800c60012219002911919806912c800c4c02401a442b26600a004019130040018c008002590028c804c8888888800d1900991111111002a244b267201722222222008001000c600518000001112a999ab9a3370e004002230001155333573466e240080044600823002229002914801c88ccd5cd19b893370400800266e0800800e00100208c8c0040048c0088cc008008005"
 
-            -- Add a 600K ada utxo to the local state
-            -- for the 6 x 100K deposits + 10 for fees etc.
+            -- Add a 600K ada utxo for the deposits and fees,
+            -- plus a distinct collateral input.
             localStateUtxos =
-                [ ( makeRef "0" 0, Utxo.fromLovelace testAddr.me (ada 600010) ) ]
+                [ ( makeRef "0" 0, Utxo.fromLovelace testAddr.me (ada 600010) )
+                , ( makeRef "collateral" 0, Utxo.fromLovelace testAddr.me (ada 5) )
+                ]
           in
           okTxTest "Test with 6 different proposals"
             { govState =
@@ -742,10 +1331,10 @@ okTxBuilding =
                                 -- script stuff
                                 , scriptDataHash = tx.body.scriptDataHash
 
-                                -- collateral would cost 3 ada for 2 ada fees, so return 600010-3=600007 ada
-                                , collateral = [ makeRef "0" 0 ]
+                                -- Collateral costs 3 ada for 2 ada fees, returning 2 ada.
+                                , collateral = [ makeRef "collateral" 0 ]
                                 , totalCollateral = Just 3000000
-                                , collateralReturn = Just (Utxo.fromLovelace testAddr.me (ada 600007))
+                                , collateralReturn = Just (Utxo.fromLovelace testAddr.me (ada 2))
                             }
                         , witnessSet =
                             { newWitnessSet
@@ -884,7 +1473,13 @@ okTxBuilding =
                         { delegator =
                             WithScript indexedScript.hash <|
                                 Witness.Plutus (indexedScript.witness redeemer)
-                        , deposit = Natural.zero
+                        , deposit = ada 2
+                        }
+                , Spend <|
+                    FromWallet
+                        { address = testAddr.me
+                        , value = Value.onlyLovelace <| ada 2
+                        , guaranteedUtxos = []
                         }
                 ]
 
@@ -911,6 +1506,7 @@ okTxBuilding =
             , localStateUtxos =
                 [ makeAdaOutput 0 testAddr.me 5
                 , makeAdaOutput 1 indexedScript.address 2
+                , makeAdaOutput 2 testAddr.me 5
                 ]
             , evalScriptsCosts = Uplc.evalScriptsCosts Uplc.defaultVmConfig
             , fee = twoAdaFee
