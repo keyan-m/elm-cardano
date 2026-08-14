@@ -11,7 +11,7 @@ import Cardano.MultiAsset as MultiAsset exposing (PolicyId)
 import Cardano.Redeemer exposing (Redeemer)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction, newBody, newWitnessSet)
-import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), CollateralWithoutReturnError(..), Fee(..), GovernanceState, SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
+import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), CollateralInputs(..), CollateralOptions, CollateralReturn(..), Fee(..), GovernanceState, SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
@@ -27,13 +27,13 @@ suite =
     describe "Cardano Tx building"
         [ okTxBuilding
         , failTxBuilding
-        , collateralWithoutReturnTests
+        , collateralOptionsTests
         , balanceIntents
         ]
 
 
-collateralWithoutReturnTests : Test
-collateralWithoutReturnTests =
+collateralOptionsTests : Test
+collateralOptionsTests =
     let
         aliceCollateral =
             makeCollateralOutput "alice" 1
@@ -59,28 +59,30 @@ collateralWithoutReturnTests =
         daveRef =
             Tuple.first daveCollateral
 
+        manualCollateral firstReference otherReferences collateralReturn =
+            { inputs = ManualCollateral firstReference otherReferences
+            , return = collateralReturn
+            }
+
         expectFailure matches result =
             case result of
-                Err (InvalidCollateralWithoutReturn collateralError) ->
-                    if matches collateralError then
+                Err error ->
+                    if matches error then
                         Expect.pass
 
                     else
-                        Expect.fail ("Unexpected collateral error: " ++ Debug.toString collateralError)
-
-                Err error ->
-                    Expect.fail ("Unexpected finalization error: " ++ Debug.toString error)
+                        Expect.fail ("Unexpected finalization error: " ++ Debug.toString error)
 
                 Ok _ ->
                     Expect.fail "This transaction was expected to fail"
     in
-    describe "Collateral without return"
-        [ test "uses a non-empty batch whose combined value covers collateral" <|
+    describe "Collateral options"
+        [ test "manually selects multiple inputs without a return" <|
             \_ ->
                 case
-                    finalizeWithExplicitCollateral
+                    finalizeWithCollateral
                         [ aliceCollateral, bobCollateral ]
-                        [ TxCollateralWithoutReturn aliceRef [ bobRef ] ]
+                        (manualCollateral aliceRef [ bobRef ] NoCollateralReturn)
                 of
                     Err error ->
                         Expect.fail (Debug.toString error)
@@ -99,7 +101,7 @@ collateralWithoutReturnTests =
                             , totalCollateral = tx.body.totalCollateral
                             , expectedSignatures = List.map Bytes.toHex expectedSignatures |> List.sort
                             }
-        , test "concatenates occurrences and uses every supplied input" <|
+        , test "manually selects every input and returns the excess" <|
             \_ ->
                 let
                     largeCollateral =
@@ -109,11 +111,9 @@ collateralWithoutReturnTests =
                         Tuple.first largeCollateral
                 in
                 case
-                    finalizeWithExplicitCollateral
+                    finalizeWithCollateral
                         [ largeCollateral, aliceCollateral ]
-                        [ TxCollateralWithoutReturn largeRef []
-                        , TxCollateralWithoutReturn aliceRef []
-                        ]
+                        (manualCollateral largeRef [ aliceRef ] ReturnExcess)
                 of
                     Err error ->
                         Expect.fail (Debug.toString error)
@@ -121,6 +121,33 @@ collateralWithoutReturnTests =
                     Ok { tx } ->
                         Expect.equal
                             { collateral = List.map Utxo.refAsString [ largeRef, aliceRef ]
+                            , collateralReturn = Just (Utxo.fromLovelace (makeWalletAddress "large") (ada 2))
+                            , totalCollateral = Just 3000000
+                            }
+                            { collateral = List.map Utxo.refAsString tx.body.collateral
+                            , collateralReturn = tx.body.collateralReturn
+                            , totalCollateral = tx.body.totalCollateral
+                            }
+        , test "automatically selects collateral without a return" <|
+            \_ ->
+                let
+                    autoRef =
+                        makeRef "auto-collateral" 0
+
+                    autoCollateral =
+                        ( autoRef, Utxo.fromLovelace testAddr.me (ada 5) )
+                in
+                case
+                    finalizeWithCollateral
+                        [ autoCollateral ]
+                        { inputs = AutomaticCollateral, return = NoCollateralReturn }
+                of
+                    Err error ->
+                        Expect.fail (Debug.toString error)
+
+                    Ok { tx } ->
+                        Expect.equal
+                            { collateral = [ Utxo.refAsString autoRef ]
                             , collateralReturn = Nothing
                             , totalCollateral = Just 5000000
                             }
@@ -128,57 +155,74 @@ collateralWithoutReturnTests =
                             , collateralReturn = tx.body.collateralReturn
                             , totalCollateral = tx.body.totalCollateral
                             }
-        , test "accepts exactly three inputs" <|
+        , test "returns native assets from manually selected collateral" <|
+            \_ ->
+                let
+                    tokenRef =
+                        makeRef "token-collateral" 0
+
+                    tokenOutput =
+                        { address = makeWalletAddress "token"
+                        , amount =
+                            Value.onlyLovelace (ada 5)
+                                |> Value.add (Value.onlyToken cat.policyId cat.assetName Natural.one)
+                        , datumOption = Nothing
+                        , referenceScript = Nothing
+                        }
+                in
+                case
+                    finalizeWithCollateral
+                        [ ( tokenRef, tokenOutput ) ]
+                        (manualCollateral tokenRef [] ReturnExcess)
+                of
+                    Err error ->
+                        Expect.fail (Debug.toString error)
+
+                    Ok { tx } ->
+                        Expect.equal
+                            (Just
+                                { tokenOutput
+                                    | amount =
+                                        Value.onlyLovelace (ada 2)
+                                            |> Value.add (Value.onlyToken cat.policyId cat.assetName Natural.one)
+                                }
+                            )
+                            tx.body.collateralReturn
+        , test "accepts exactly three manually selected inputs" <|
             \_ ->
                 case
-                    finalizeWithExplicitCollateral
+                    finalizeWithCollateral
                         [ aliceCollateral, carolCollateral, daveCollateral ]
-                        [ TxCollateralWithoutReturn aliceRef [ carolRef, daveRef ] ]
+                        (manualCollateral aliceRef [ carolRef, daveRef ] NoCollateralReturn)
                 of
                     Err error ->
                         Expect.fail (Debug.toString error)
 
                     Ok { tx } ->
                         Expect.equal 3 (List.length tx.body.collateral)
-        , test "rejects more than three inputs" <|
+        , test "rejects more than three manually selected inputs" <|
             \_ ->
-                finalizeWithExplicitCollateral
+                finalizeWithCollateral
                     [ aliceCollateral, bobCollateral, carolCollateral, daveCollateral ]
-                    [ TxCollateralWithoutReturn aliceRef [ bobRef, carolRef, daveRef ] ]
+                    (manualCollateral aliceRef [ bobRef, carolRef, daveRef ] NoCollateralReturn)
                     |> expectFailure
                         (\error ->
                             case error of
-                                TooManyCollateralInputs { maximum, actual } ->
-                                    maximum == 3 && actual == 4
-
-                                _ ->
-                                    False
-                        )
-        , test "rejects a duplicate within one occurrence" <|
-            \_ ->
-                finalizeWithExplicitCollateral
-                    [ bobCollateral ]
-                    [ TxCollateralWithoutReturn bobRef [ bobRef ] ]
-                    |> expectFailure
-                        (\error ->
-                            case error of
-                                DuplicateCollateralInputs _ ->
+                                CollateralSelectionError CoinSelection.MaximumInputCountExceeded ->
                                     True
 
                                 _ ->
                                     False
                         )
-        , test "rejects a duplicate across occurrences" <|
+        , test "rejects a duplicate manual input" <|
             \_ ->
-                finalizeWithExplicitCollateral
+                finalizeWithCollateral
                     [ bobCollateral ]
-                    [ TxCollateralWithoutReturn bobRef []
-                    , TxCollateralWithoutReturn bobRef []
-                    ]
+                    (manualCollateral bobRef [ bobRef ] NoCollateralReturn)
                     |> expectFailure
                         (\error ->
                             case error of
-                                DuplicateCollateralInputs _ ->
+                                InvalidCollateral _ ->
                                     True
 
                                 _ ->
@@ -186,19 +230,19 @@ collateralWithoutReturnTests =
                         )
         , test "rejects an output absent from local state" <|
             \_ ->
-                finalizeWithExplicitCollateral
+                finalizeWithCollateral
                     []
-                    [ TxCollateralWithoutReturn aliceRef [] ]
+                    (manualCollateral aliceRef [] NoCollateralReturn)
                     |> expectFailure
                         (\error ->
                             case error of
-                                CollateralInputMissing _ ->
+                                InvalidCollateral _ ->
                                     True
 
                                 _ ->
                                     False
                         )
-        , test "rejects an output containing native assets" <|
+        , test "rejects native assets when no collateral is returned" <|
             \_ ->
                 let
                     tokenRef =
@@ -213,13 +257,13 @@ collateralWithoutReturnTests =
                         , referenceScript = Nothing
                         }
                 in
-                finalizeWithExplicitCollateral
+                finalizeWithCollateral
                     [ ( tokenRef, tokenOutput ) ]
-                    [ TxCollateralWithoutReturn tokenRef [] ]
+                    (manualCollateral tokenRef [] NoCollateralReturn)
                     |> expectFailure
                         (\error ->
                             case error of
-                                CollateralInputContainsNonAda _ ->
+                                InvalidCollateral _ ->
                                     True
 
                                 _ ->
@@ -234,13 +278,13 @@ collateralWithoutReturnTests =
                     scriptOutput =
                         Utxo.fromLovelace indexedScript.address (ada 3)
                 in
-                finalizeWithExplicitCollateral
+                finalizeWithCollateral
                     [ ( scriptRef, scriptOutput ) ]
-                    [ TxCollateralWithoutReturn scriptRef [] ]
+                    (manualCollateral scriptRef [] ReturnExcess)
                     |> expectFailure
                         (\error ->
                             case error of
-                                CollateralInputNotVerificationKeyControlled _ ->
+                                InvalidCollateral _ ->
                                     True
 
                                 _ ->
@@ -248,14 +292,14 @@ collateralWithoutReturnTests =
                         )
         , test "rejects insufficient combined value" <|
             \_ ->
-                finalizeWithExplicitCollateral
+                finalizeWithCollateral
                     [ aliceCollateral, carolCollateral ]
-                    [ TxCollateralWithoutReturn aliceRef [ carolRef ] ]
+                    (manualCollateral aliceRef [ carolRef ] NoCollateralReturn)
                     |> expectFailure
                         (\error ->
                             case error of
-                                InsufficientCollateralWithoutReturn { selected, required } ->
-                                    selected == ada 2 && required == ada 3
+                                CollateralSelectionError (CoinSelection.UTxOBalanceInsufficient _) ->
+                                    True
 
                                 _ ->
                                     False
@@ -263,9 +307,8 @@ collateralWithoutReturnTests =
         , test "does not validate or add collateral when no Plutus execution requires it" <|
             \_ ->
                 let
-                    missingRefs =
-                        List.range 0 3
-                            |> List.map (makeRef "unused-collateral")
+                    firstMissingRef =
+                        makeRef "unused-collateral" 0
 
                     buildingConfig =
                         { govState = TxIntent.emptyGovernanceState
@@ -278,10 +321,8 @@ collateralWithoutReturnTests =
                 case
                     finalizeAdvanced buildingConfig
                         twoAdaFee
-                        [ TxCollateralWithoutReturn
-                            (List.head missingRefs |> Maybe.withDefault aliceRef)
-                            (List.drop 1 missingRefs)
-                        ]
+                        (manualCollateral firstMissingRef [] NoCollateralReturn)
+                        []
                         []
                 of
                     Err error ->
@@ -424,7 +465,7 @@ okTxBuilding =
                         , SendTo testAddr.me (Value.onlyLovelace <| ada 1)
                         ]
                 in
-                Expect.ok (TxIntent.finalize localStateUtxos [] txIntents)
+                Expect.ok (TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions [] txIntents)
         , okTxTest "send 1 ada from me to you"
             { govState = TxIntent.emptyGovernanceState
             , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
@@ -1153,7 +1194,7 @@ okTxTest description { govState, localStateUtxos, evalScriptsCosts, fee, txOther
                     , costModels = Uplc.conwayDefaultCostModels
                     }
             in
-            case finalizeAdvanced buildingConfig fee txOtherInfo txIntents of
+            case finalizeAdvanced buildingConfig fee TxIntent.defaultCollateralOptions txOtherInfo txIntents of
                 Err error ->
                     Expect.fail (Debug.toString error)
 
@@ -1170,7 +1211,7 @@ failTxBuilding =
                     localStateUtxos =
                         Utxo.refDictFromList [ makeAdaOutput 0 testAddr.me 5 ]
                 in
-                Expect.equal (Err UnableToGuessFeeSource) (TxIntent.finalize localStateUtxos [] [])
+                Expect.equal (Err UnableToGuessFeeSource) (TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions [] [])
         , failTxTest "when there is no utxo in local state"
             { govState = TxIntent.emptyGovernanceState
             , localStateUtxos = []
@@ -2038,7 +2079,7 @@ failTxTest description { govState, localStateUtxos, evalScriptsCosts, fee, txOth
                     , costModels = Uplc.conwayDefaultCostModels
                     }
             in
-            case finalizeAdvanced buildingConfig fee txOtherInfo txIntents of
+            case finalizeAdvanced buildingConfig fee TxIntent.defaultCollateralOptions txOtherInfo txIntents of
                 Err error ->
                     expectedFailure error
 
@@ -2139,11 +2180,11 @@ autoFee =
 -- Helper functions
 
 
-finalizeWithExplicitCollateral :
+finalizeWithCollateral :
     List ( OutputReference, Output )
-    -> List TxOtherInfo
+    -> CollateralOptions
     -> Result TxFinalizationError TxFinalized
-finalizeWithExplicitCollateral collateralUtxos txOtherInfo =
+finalizeWithCollateral collateralUtxos collateralOptions =
     let
         scriptInput =
             makeRef "explicit-collateral-script-input" 0
@@ -2173,7 +2214,7 @@ finalizeWithExplicitCollateral collateralUtxos txOtherInfo =
             , SendTo testAddr.me (Value.onlyLovelace <| ada 2)
             ]
     in
-    finalizeAdvanced buildingConfig twoAdaFee txOtherInfo txIntents
+    finalizeAdvanced buildingConfig twoAdaFee collateralOptions [] txIntents
 
 
 makeCollateralOutput : String -> Int -> ( OutputReference, Output )

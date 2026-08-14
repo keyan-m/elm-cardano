@@ -405,6 +405,7 @@ update msg model =
                             }
                             -- Use fee provider for fees
                             (AutoFee { paymentSource = ctx.feeProvider.address })
+                            TxIntent.defaultCollateralOptions
                             []
             in
             case unlockTxAttempt of
@@ -454,7 +455,7 @@ lock ({ localStateUtxos, myKeyCred, myStakeKeyHash, scriptAddress, loadedWallet,
                 , referenceScript = Nothing
                 }
             ]
-                |> TxIntent.finalize localStateUtxos []
+                |> TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions []
     in
     case lockTxAttempt of
         Ok { tx } ->

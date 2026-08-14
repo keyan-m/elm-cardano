@@ -484,6 +484,7 @@ update msg model =
                             , costModels = ctx.protocolParams.costModels
                             }
                             (AutoFee { paymentSource = ctx.loadedWallet.changeAddress })
+                            TxIntent.defaultCollateralOptions
                             []
             in
             case regDRepTxAttempt of
@@ -563,6 +564,7 @@ update msg model =
                             , costModels = ctx.protocolParams.costModels
                             }
                             (AutoFee { paymentSource = ctx.feeProvider.address })
+                            TxIntent.defaultCollateralOptions
                             []
             in
             case voteTxAttempt of
@@ -610,6 +612,7 @@ update msg model =
                             , costModels = ctx.protocolParams.costModels
                             }
                             (AutoFee { paymentSource = ctx.loadedWallet.changeAddress })
+                            TxIntent.defaultCollateralOptions
                             []
             in
             case unregDRepTxAttempt of

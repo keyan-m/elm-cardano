@@ -741,6 +741,7 @@ finalize ctx govState intents =
         , costModels = ctx.costModels
         }
         (AutoFee { paymentSource = ctx.loadedWallet.changeAddress })
+        TxIntent.defaultCollateralOptions
         []
         intents
         |> Result.mapError TxIntent.errorToString

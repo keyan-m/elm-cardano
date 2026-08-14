@@ -355,7 +355,7 @@ update msg model =
                             txIntents =
                                 [ SendTo (Cip30.walletChangeAddress wallet) CValue.zero ]
                         in
-                        case TxIntent.finalize localStateUtxos [] txIntents of
+                        case TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions [] txIntents of
                             Ok { tx } ->
                                 ( { model | signedTx = WaitingSign tx }
                                 , toWallet (Cip30.encodeRequest (Cip30.signTx wallet { partialSign = False } tx))
