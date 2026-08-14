@@ -2,7 +2,7 @@ module Cardano.CoinSelection exposing
     ( Context, Error(..), errorToString, Selection, Algorithm
     , largestFirst, inOrderedList
     , perAddress, PerAddressConfig, PerAddressContext
-    , CollateralContext, CollateralConfig, collateral, collateralWith
+    , CollateralContext, collateral
     )
 
 {-| Module `Cardano.CoinSelection` provides functionality for performing
@@ -28,7 +28,7 @@ selection algorithm as described in CIP2 (<https://cips.cardano.org/cips/cip2/>)
 
 # Collateral Selection
 
-@docs CollateralContext, CollateralConfig, collateral, collateralWith
+@docs CollateralContext, collateral
 
 -}
 
@@ -482,13 +482,6 @@ type alias CollateralContext =
     }
 
 
-{-| Configuration for collateral selection.
--}
-type alias CollateralConfig =
-    { maxInputCount : Int
-    }
-
-
 {-| Perform collateral selection.
 
 Only UTxOs at the provided whitelist of addresses are viable.
@@ -505,15 +498,12 @@ UTxOs are picked following a prioritization list.
 
 -}
 collateral : CollateralContext -> Result Error Selection
-collateral =
-    collateralWith { maxInputCount = 3 }
-
-
-{-| Perform collateral selection with a caller-provided maximum input count.
--}
-collateralWith : CollateralConfig -> CollateralContext -> Result Error Selection
-collateralWith { maxInputCount } { availableUtxos, allowedAddresses, targetAmount } =
+collateral { availableUtxos, allowedAddresses, targetAmount } =
     let
+        -- TODO: max inputs should come from a network parameter
+        maxInputCount =
+            3
+
         utxosInAllowedAddresses : List ( OutputReference, Output )
         utxosInAllowedAddresses =
             availableUtxos

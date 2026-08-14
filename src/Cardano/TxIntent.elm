@@ -937,15 +937,13 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                             else
                                 case processedOtherInfo.collateralWithoutReturn of
                                     [] ->
-                                        CoinSelection.collateralWith
-                                            { maxInputCount = defaultMaxCollateralInputs }
+                                        CoinSelection.collateral
                                             (CoinSelection.CollateralContext (Dict.Any.toList localStateUtxos) collateralSources collateralAmount)
                                             |> Result.mapError CollateralSelectionError
 
                                     references ->
                                         selectCollateralWithoutReturn
                                             { localStateUtxos = localStateUtxos
-                                            , maxInputCount = defaultMaxCollateralInputs
                                             , requiredAmount = collateralAmount
                                             }
                                             references
@@ -1013,12 +1011,11 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
 
 selectCollateralWithoutReturn :
     { localStateUtxos : Utxo.RefDict Output
-    , maxInputCount : Int
     , requiredAmount : Natural
     }
     -> List OutputReference
     -> Result TxFinalizationError CoinSelection.Selection
-selectCollateralWithoutReturn { localStateUtxos, maxInputCount, requiredAmount } references =
+selectCollateralWithoutReturn { localStateUtxos, requiredAmount } references =
     let
         duplicatedReferences : List OutputReference
         duplicatedReferences =
@@ -1086,11 +1083,11 @@ selectCollateralWithoutReturn { localStateUtxos, maxInputCount, requiredAmount }
     if not <| List.isEmpty duplicatedReferences then
         Err <| InvalidCollateralWithoutReturn <| DuplicateCollateralInputs duplicatedReferences
 
-    else if List.length references > maxInputCount then
+    else if List.length references > defaultMaxCollateralInputs then
         Err <|
             InvalidCollateralWithoutReturn <|
                 TooManyCollateralInputs
-                    { maximum = maxInputCount
+                    { maximum = defaultMaxCollateralInputs
                     , actual = List.length references
                     }
 
