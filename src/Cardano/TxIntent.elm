@@ -182,16 +182,6 @@ type ActionProposal
 
 
 {-| Represents additional information for a transaction.
-
-`TxCollateralWithoutReturn first rest` provides a non-empty batch of exact
-collateral inputs to use without creating a collateral return. Batches from
-multiple occurrences are concatenated. They are only used when the transaction
-contains Plutus scripts; otherwise no collateral is added.
-
-Every selected output must be present in the local state, contain only ADA, and
-be controlled by a Shelley verification key. Their combined lovelace value must
-cover the required collateral.
-
 -}
 type TxOtherInfo
     = TxReferenceInput OutputReference
@@ -215,16 +205,6 @@ This is represented as 500K lovelace, which is encoded as a 32bit uint.
 defaultAutoFee : Natural
 defaultAutoFee =
     Natural.fromSafeInt 500000
-
-
-{-| Default maximum number of collateral inputs used during finalization.
-
-TODO: Source this from protocol parameters once they are provided to finalization.
-
--}
-defaultMaxCollateralInputs : Int
-defaultMaxCollateralInputs =
-    3
 
 
 {-| Result of the Tx finalization.
@@ -1083,11 +1063,11 @@ selectCollateralWithoutReturn { localStateUtxos, requiredAmount } references =
     if not <| List.isEmpty duplicatedReferences then
         Err <| InvalidCollateralWithoutReturn <| DuplicateCollateralInputs duplicatedReferences
 
-    else if List.length references > defaultMaxCollateralInputs then
+    else if List.length references > CoinSelection.defaultMaxCollateralInputs then
         Err <|
             InvalidCollateralWithoutReturn <|
                 TooManyCollateralInputs
-                    { maximum = defaultMaxCollateralInputs
+                    { maximum = CoinSelection.defaultMaxCollateralInputs
                     , actual = List.length references
                     }
 
