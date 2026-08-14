@@ -207,16 +207,6 @@ defaultAutoFee =
     Natural.fromSafeInt 500000
 
 
-{-| Default maximum number of collateral inputs used during finalization.
-
-TODO: Source this from protocol parameters once they are provided to finalization.
-
--}
-defaultMaxCollateralInputs : Int
-defaultMaxCollateralInputs =
-    3
-
-
 {-| Result of the Tx finalization.
 
 The hashes of the credentials expected to provide a signature
@@ -1073,11 +1063,11 @@ selectCollateralWithoutReturn { localStateUtxos, requiredAmount } references =
     if not <| List.isEmpty duplicatedReferences then
         Err <| InvalidCollateralWithoutReturn <| DuplicateCollateralInputs duplicatedReferences
 
-    else if List.length references > defaultMaxCollateralInputs then
+    else if List.length references > CoinSelection.defaultMaxCollateralInputs then
         Err <|
             InvalidCollateralWithoutReturn <|
                 TooManyCollateralInputs
-                    { maximum = defaultMaxCollateralInputs
+                    { maximum = CoinSelection.defaultMaxCollateralInputs
                     , actual = List.length references
                     }
 
