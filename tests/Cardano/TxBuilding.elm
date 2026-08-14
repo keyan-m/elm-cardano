@@ -11,7 +11,7 @@ import Cardano.MultiAsset as MultiAsset exposing (PolicyId)
 import Cardano.Redeemer exposing (Redeemer)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction, newBody, newWitnessSet)
-import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), CollateralInputs(..), CollateralOptions, CollateralReturn(..), Fee(..), GovernanceState, SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
+import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), CollateralFailure(..), CollateralInputs(..), CollateralOptions, CollateralReturn(..), Fee(..), GovernanceState, SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
@@ -208,7 +208,7 @@ collateralOptionsTests =
                     |> expectFailure
                         (\error ->
                             case error of
-                                CollateralSelectionError CoinSelection.MaximumInputCountExceeded ->
+                                CollateralError (SelectionFailed CoinSelection.MaximumInputCountExceeded) ->
                                     True
 
                                 _ ->
@@ -222,8 +222,8 @@ collateralOptionsTests =
                     |> expectFailure
                         (\error ->
                             case error of
-                                InvalidCollateral _ ->
-                                    True
+                                CollateralError (DuplicateInputs [ reference ]) ->
+                                    Utxo.refAsString reference == Utxo.refAsString bobRef
 
                                 _ ->
                                     False
@@ -236,8 +236,8 @@ collateralOptionsTests =
                     |> expectFailure
                         (\error ->
                             case error of
-                                InvalidCollateral _ ->
-                                    True
+                                CollateralError (InputMissing reference) ->
+                                    Utxo.refAsString reference == Utxo.refAsString aliceRef
 
                                 _ ->
                                     False
@@ -263,8 +263,8 @@ collateralOptionsTests =
                     |> expectFailure
                         (\error ->
                             case error of
-                                InvalidCollateral _ ->
-                                    True
+                                CollateralError (NonAdaInputWithoutReturn reference) ->
+                                    Utxo.refAsString reference == Utxo.refAsString tokenRef
 
                                 _ ->
                                     False
@@ -284,8 +284,8 @@ collateralOptionsTests =
                     |> expectFailure
                         (\error ->
                             case error of
-                                InvalidCollateral _ ->
-                                    True
+                                CollateralError (InputNotVerificationKeyControlled reference) ->
+                                    Utxo.refAsString reference == Utxo.refAsString scriptRef
 
                                 _ ->
                                     False
@@ -298,7 +298,7 @@ collateralOptionsTests =
                     |> expectFailure
                         (\error ->
                             case error of
-                                CollateralSelectionError (CoinSelection.UTxOBalanceInsufficient _) ->
+                                CollateralError (SelectionFailed (CoinSelection.UTxOBalanceInsufficient _)) ->
                                     True
 
                                 _ ->
@@ -1468,7 +1468,7 @@ failTxBuilding =
             }
             (\error ->
                 case error of
-                    CollateralSelectionError (CoinSelection.UTxOBalanceInsufficient _) ->
+                    CollateralError (SelectionFailed (CoinSelection.UTxOBalanceInsufficient _)) ->
                         Expect.pass
 
                     _ ->
