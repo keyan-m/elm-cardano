@@ -2,7 +2,7 @@ module Cardano.CoinSelection exposing
     ( Context, Error(..), errorToString, Selection, Algorithm
     , largestFirst, inOrderedList
     , perAddress, PerAddressConfig, PerAddressContext
-    , CollateralContext, defaultMaxCollateralInputs, collateral
+    , CollateralContext, collateral
     )
 
 {-| Module `Cardano.CoinSelection` provides functionality for performing
@@ -28,7 +28,7 @@ selection algorithm as described in CIP2 (<https://cips.cardano.org/cips/cip2/>)
 
 # Collateral Selection
 
-@docs CollateralContext, defaultMaxCollateralInputs, collateral
+@docs CollateralContext, collateral
 
 -}
 
@@ -482,16 +482,6 @@ type alias CollateralContext =
     }
 
 
-{-| Default maximum number of collateral inputs used during selection.
-
-TODO: Source this from a network parameter.
-
--}
-defaultMaxCollateralInputs : Int
-defaultMaxCollateralInputs =
-    3
-
-
 {-| Perform collateral selection.
 
 Only UTxOs at the provided whitelist of addresses are viable.
@@ -510,6 +500,10 @@ UTxOs are picked following a prioritization list.
 collateral : CollateralContext -> Result Error Selection
 collateral { availableUtxos, allowedAddresses, targetAmount } =
     let
+        -- TODO: max inputs should come from a network parameter
+        maxInputCount =
+            3
+
         utxosInAllowedAddresses : List ( OutputReference, Output )
         utxosInAllowedAddresses =
             availableUtxos
@@ -555,7 +549,7 @@ collateral { availableUtxos, allowedAddresses, targetAmount } =
             List.sortBy (\( _, { amount } ) -> adaComparableAmount amount.lovelace) highAdaOnly
 
         viableUtxos =
-            if highAdaOnlyCount >= defaultMaxCollateralInputs then
+            if highAdaOnlyCount >= maxInputCount then
                 highAdaOnlySorted
 
             else
@@ -577,7 +571,7 @@ collateral { availableUtxos, allowedAddresses, targetAmount } =
                     highAssetsOnlySorted =
                         List.sortBy (Tuple.second >> Utxo.bytesWidth) highAssetsOnly
                 in
-                if highAdaOnlyCount + highAssetsOnlyCount >= defaultMaxCollateralInputs then
+                if highAdaOnlyCount + highAssetsOnlyCount >= maxInputCount then
                     List.concat [ highAdaOnlySorted, highAssetsOnlySorted ]
 
                 else
@@ -601,7 +595,7 @@ collateral { availableUtxos, allowedAddresses, targetAmount } =
                     in
                     List.concat [ highAdaOnlySorted, highAssetsOnlySorted, allOtherUtxosSorted ]
     in
-    inOrderedList defaultMaxCollateralInputs
+    inOrderedList maxInputCount
         { alreadySelectedUtxos = []
         , targetAmount = Value.onlyLovelace targetAmount
         , availableUtxos = viableUtxos
