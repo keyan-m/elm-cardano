@@ -531,11 +531,10 @@ In case you want more customization, please use [finalizeAdvanced].
 -}
 finalize :
     Utxo.RefDict Output
-    -> CollateralOptions
     -> List TxOtherInfo
     -> List TxIntent
     -> Result TxFinalizationError TxFinalized
-finalize localStateUtxos collateralOptions txOtherInfo txIntents =
+finalize localStateUtxos txOtherInfo txIntents =
     assertNoGovProposals txIntents
         |> Result.andThen (\_ -> guessFeeSource txIntents)
         |> Result.andThen
@@ -548,7 +547,7 @@ finalize localStateUtxos collateralOptions txOtherInfo txIntents =
                     , costModels = Uplc.conwayDefaultCostModels
                     }
                     (AutoFee { paymentSource = feeSource })
-                    collateralOptions
+                    defaultCollateralOptions
                     txOtherInfo
                     txIntents
             )

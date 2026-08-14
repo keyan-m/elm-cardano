@@ -104,7 +104,7 @@ example1 _ =
     [ Spend <| FromWallet { address = exAddr.me, value = ada.one, guaranteedUtxos = [] }
     , SendTo exAddr.you ada.one
     ]
-        |> finalize globalStateUtxos defaultCollateralOptions [ TxMetadata { tag = Natural.fromSafeInt 14, metadata = Metadatum.Int (Integer.fromSafeInt 42) } ]
+        |> finalize globalStateUtxos [ TxMetadata { tag = Natural.fromSafeInt 14, metadata = Metadatum.Int (Integer.fromSafeInt 42) } ]
 
 
 
@@ -133,7 +133,7 @@ example2 _ =
         , scriptWitness = Witness.Native { script = Witness.ByReference cat.scriptRef, expectedSigners = [] }
         }
     ]
-        |> finalize globalStateUtxos defaultCollateralOptions []
+        |> finalize globalStateUtxos []
 
 
 
@@ -217,7 +217,7 @@ example3 _ =
     -- Return the other 2 ada to the lock script (there was 4 ada initially)
     , SendToOutput (makeLockedOutput ada.two)
     ]
-        |> finalize localStateUtxos defaultCollateralOptions []
+        |> finalize localStateUtxos []
 
 
 
@@ -235,7 +235,7 @@ example4 _ =
     , IssueCertificate <| DelegateStake { delegator = WithKey myStakeKeyHash, poolId = Bytes.dummy 28 "poolId" }
     , IssueCertificate <| DelegateVotes { delegator = WithKey myStakeKeyHash, drep = VKeyHash <| dummyCredentialHash "drep" }
     ]
-        |> finalize globalStateUtxos defaultCollateralOptions []
+        |> finalize globalStateUtxos []
 
 
 
@@ -396,7 +396,7 @@ example6 _ =
     -- Small trick just to help the Tx builder figuring out who is paying the Tx fee
     , SendTo exAddr.me (Value.onlyLovelace Natural.zero)
     ]
-        |> finalize globalStateUtxos defaultCollateralOptions []
+        |> finalize globalStateUtxos []
 
 
 

@@ -281,7 +281,7 @@ update msg model =
                         )
                     , SendTo ctx.loadedWallet.changeAddress twoAda
                     ]
-                        |> TxIntent.finalize ctx.localStateUtxos TxIntent.defaultCollateralOptions []
+                        |> TxIntent.finalize ctx.localStateUtxos []
             in
             case unlockTxAttempt of
                 Ok { tx } ->
@@ -320,7 +320,7 @@ lock ({ localStateUtxos, myKeyCred, scriptAddress, loadedWallet, lockScript } as
                 , referenceScript = Nothing
                 }
             ]
-                |> TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions []
+                |> TxIntent.finalize localStateUtxos []
     in
     case lockTxAttempt of
         Ok { tx } ->

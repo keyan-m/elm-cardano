@@ -455,7 +455,7 @@ lock ({ localStateUtxos, myKeyCred, myStakeKeyHash, scriptAddress, loadedWallet,
                 , referenceScript = Nothing
                 }
             ]
-                |> TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions []
+                |> TxIntent.finalize localStateUtxos []
     in
     case lockTxAttempt of
         Ok { tx } ->

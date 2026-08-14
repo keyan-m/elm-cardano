@@ -465,7 +465,7 @@ okTxBuilding =
                         , SendTo testAddr.me (Value.onlyLovelace <| ada 1)
                         ]
                 in
-                Expect.ok (TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions [] txIntents)
+                Expect.ok (TxIntent.finalize localStateUtxos [] txIntents)
         , okTxTest "send 1 ada from me to you"
             { govState = TxIntent.emptyGovernanceState
             , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
@@ -1211,7 +1211,7 @@ failTxBuilding =
                     localStateUtxos =
                         Utxo.refDictFromList [ makeAdaOutput 0 testAddr.me 5 ]
                 in
-                Expect.equal (Err UnableToGuessFeeSource) (TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions [] [])
+                Expect.equal (Err UnableToGuessFeeSource) (TxIntent.finalize localStateUtxos [] [])
         , failTxTest "when there is no utxo in local state"
             { govState = TxIntent.emptyGovernanceState
             , localStateUtxos = []

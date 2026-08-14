@@ -431,7 +431,7 @@ finalizeTx ctx mPrevTxId intents =
                     Locking
 
         txAttempt =
-            TxIntent.finalize ctx.localStateUtxos TxIntent.defaultCollateralOptions [] intents
+            TxIntent.finalize ctx.localStateUtxos [] intents
     in
     case txAttempt of
         Ok { tx } ->

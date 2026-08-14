@@ -354,7 +354,7 @@ update msg model =
                     , Spend <| FromWallet { address = ctx.loadedWallet.changeAddress, value = bucketValueIncrease, guaranteedUtxos = [] }
                     , SendToOutputAdvanced outputBucket
                     ]
-                        |> TxIntent.finalize ctx.localStateUtxos TxIntent.defaultCollateralOptions []
+                        |> TxIntent.finalize ctx.localStateUtxos []
             in
             case reuseBucketTxAttempt of
                 Ok { tx } ->
@@ -396,7 +396,7 @@ createBucket ({ localStateUtxos, myKeyCred, scriptAddress, loadedWallet, lockScr
                 , referenceScript = Nothing
                 }
             ]
-                |> TxIntent.finalize localStateUtxos TxIntent.defaultCollateralOptions []
+                |> TxIntent.finalize localStateUtxos []
     in
     case createBucketTxAttempt of
         Ok { tx } ->
