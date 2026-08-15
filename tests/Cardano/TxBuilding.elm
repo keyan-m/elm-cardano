@@ -75,6 +75,16 @@ collateralOptionsTests =
 
                 Ok _ ->
                     Expect.fail "This transaction was expected to fail"
+
+        matchesReturnBelowMinAda expectedInputs expectedActual expectedRequired error =
+            case error of
+                CollateralError (ReturnBelowMinAda { selectedInputs, actual, required }) ->
+                    (List.map Utxo.refAsString selectedInputs == List.map Utxo.refAsString expectedInputs)
+                        && (Natural.toString actual == Natural.toString expectedActual)
+                        && (Natural.toString required == Natural.toString expectedRequired)
+
+                _ ->
+                    False
     in
     describe "Collateral options"
         [ test "manually selects multiple inputs without a return" <|
@@ -188,6 +198,38 @@ collateralOptionsTests =
                                 }
                             )
                             tx.body.collateralReturn
+        , test "reports the serialized min-ADA for a manual native-asset return" <|
+            \_ ->
+                let
+                    collateralAddress =
+                        makeWalletAddress "native-below-min-ada"
+
+                    returnedToken =
+                        Value.onlyToken cat.policyId cat.assetName Natural.one
+
+                    required =
+                        Utxo.simpleOutput collateralAddress returnedToken
+                            |> Utxo.minAda
+
+                    actual =
+                        Natural.sub required Natural.one
+
+                    collateralRef =
+                        makeRef "native-below-min-ada" 0
+
+                    collateralOutput =
+                        { address = collateralAddress
+                        , amount =
+                            Value.onlyLovelace (Natural.add (ada 3) actual)
+                                |> Value.add returnedToken
+                        , datumOption = Nothing
+                        , referenceScript = Nothing
+                        }
+                in
+                finalizeWithCollateral
+                    [ ( collateralRef, collateralOutput ) ]
+                    (manualCollateral collateralRef [] ReturnExcess)
+                    |> expectFailure (matchesReturnBelowMinAda [ collateralRef ] actual required)
         , test "accepts exactly three manually selected inputs" <|
             \_ ->
                 case

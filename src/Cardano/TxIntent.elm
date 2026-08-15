@@ -282,6 +282,7 @@ type CollateralFailure
     | InputMissing OutputReference
     | InputNotVerificationKeyControlled OutputReference
     | NonAdaInputWithoutReturn OutputReference
+    | ReturnBelowMinAda { selectedInputs : List OutputReference, actual : Natural, required : Natural }
 
 
 {-| Provide a default function to convert an error to a human-readable string.
@@ -362,6 +363,15 @@ collateralFailureToString collateralFailure =
 
         NonAdaInputWithoutReturn reference ->
             "Invalid collateral: the selected output " ++ Utxo.refAsString reference ++ " must contain only ADA when no collateral is returned"
+
+        ReturnBelowMinAda { selectedInputs, actual, required } ->
+            "Invalid collateral return: the selected inputs "
+                ++ String.join ", " (List.map Utxo.refAsString selectedInputs)
+                ++ " would return "
+                ++ Natural.toString actual
+                ++ " lovelace, but the output requires at least "
+                ++ Natural.toString required
+                ++ " lovelace"
 
 
 {-| Attempt to balance a transaction with a provided address.
@@ -948,15 +958,7 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                                         CoinSelection.collateral
                                             (CoinSelection.CollateralContext availableUtxos collateralSources collateralAmount)
                                             |> Result.mapError SelectionFailed
-                                            |> Result.map
-                                                (\selection ->
-                                                    case collateralOptions.return of
-                                                        ReturnExcess ->
-                                                            selection
-
-                                                        NoCollateralReturn ->
-                                                            { selection | change = Nothing }
-                                                )
+                                            |> Result.andThen (validateCollateralSelection collateralOptions.return)
 
                                     ManualCollateral firstReference otherReferences ->
                                         selectManualCollateral
@@ -1080,15 +1082,7 @@ selectManualCollateral { localStateUtxos, requiredAmount, collateralReturn } ref
                 , targetAmount = Value.onlyLovelace requiredAmount
                 }
                 |> Result.mapError SelectionFailed
-                |> Result.map
-                    (\selection ->
-                        case collateralReturn of
-                            ReturnExcess ->
-                                selection
-
-                            NoCollateralReturn ->
-                                { selection | change = Nothing }
-                    )
+                |> Result.andThen (validateCollateralSelection collateralReturn)
     in
     if not <| List.isEmpty duplicatedReferences then
         Err <| DuplicateInputs duplicatedReferences
@@ -1099,6 +1093,38 @@ selectManualCollateral { localStateUtxos, requiredAmount, collateralReturn } ref
             |> Result.Extra.combine
             |> Result.andThen (List.map validateOutput >> Result.Extra.combine)
             |> Result.andThen validateSelection
+
+
+validateCollateralSelection : CollateralReturn -> CoinSelection.Selection -> Result CollateralFailure CoinSelection.Selection
+validateCollateralSelection collateralReturn selection =
+    case ( collateralReturn, collateralReturnOutput selection ) of
+        ( ReturnExcess, Just output ) ->
+            Utxo.checkMinAda output
+                |> Result.map (always selection)
+                |> Result.mapError
+                    (always <|
+                        ReturnBelowMinAda
+                            { selectedInputs = List.map Tuple.first selection.selectedUtxos
+                            , actual = output.amount.lovelace
+                            , required = Utxo.minAda output
+                            }
+                    )
+
+        ( NoCollateralReturn, _ ) ->
+            Ok { selection | change = Nothing }
+
+        _ ->
+            Ok selection
+
+
+collateralReturnOutput : CoinSelection.Selection -> Maybe Output
+collateralReturnOutput selection =
+    case ( List.head selection.selectedUtxos, selection.change ) of
+        ( Just ( _, output ), Just change ) ->
+            Just (Utxo.simpleOutput output.address change)
+
+        _ ->
+            Nothing
 
 
 {-| Helper function to update the auxiliary data hash.
@@ -2484,12 +2510,7 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
 
         collateralReturn : Maybe Output
         collateralReturn =
-            case ( List.head collateralSelection.selectedUtxos, collateralSelection.change ) of
-                ( Just ( _, output ), Just change ) ->
-                    Just <| Utxo.simpleOutput output.address change
-
-                _ ->
-                    Nothing
+            collateralReturnOutput collateralSelection
 
         totalCollateral : Maybe Int
         totalCollateral =
