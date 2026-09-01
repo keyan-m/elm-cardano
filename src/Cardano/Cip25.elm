@@ -2,7 +2,7 @@ module Cardano.Cip25 exposing
     ( Cip25, PolicyMetadata, AssetMetadata
     , File, ImageMime, MimeType, Uri
     , singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
-    , fromCbor, toCbor, fromMetadatum, toMetadatum
+    , fromMetadatum, toMetadatum
     , imageMimeFromString, imageMimeToMimeType, imageMimeToString
     , mimeTypeFromString, mimeTypeToString
     )
@@ -20,7 +20,7 @@ that transaction.
 
 @docs singleton, insertAssetMetadata, getAllMetadata, getAssetMetadata, assetMetadata, withFile, file, label
 
-@docs fromCbor, toCbor, fromMetadatum, toMetadatum
+@docs fromMetadatum, toMetadatum
 
 @docs imageMimeFromString, imageMimeToMimeType, imageMimeToString
 @docs mimeTypeFromString, mimeTypeToString
@@ -31,8 +31,6 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map as BytesMap exposing (BytesMap)
 import Cardano.Metadatum as Metadatum exposing (Metadatum)
 import Cardano.MultiAsset as MultiAsset exposing (AssetName, PolicyId)
-import Cbor.Decode as D
-import Cbor.Encode as E
 import Dict exposing (Dict)
 import Integer
 import Maybe.Extra
@@ -110,8 +108,8 @@ V1 metadata can appear on-chain with no version field, with an integer
 version, or with string versions such as "1" and "1.0". The string variants are
 not CIP-25 canonical, but they are slightly dominant on mainnet, so we accept
 them for compatibility. Since V1 values are only created by decoding, the
-internal version keeps the decoded wire shape so `fromCbor >> toCbor` can
-preserve existing payloads.
+internal version keeps the decoded wire shape so converting back to metadatum
+can preserve existing payloads.
 
 -}
 type Version
@@ -284,7 +282,7 @@ toMetadatum (Cip25 cip25) =
             v1ToMetadatum [ ( Metadatum.String "version", Metadatum.String version ) ]
 
         V1Int ->
-            v1ToMetadatum [ ( Metadatum.String "version", Metadatum.Int (Integer.fromSafeInt 1) ) ]
+            v1ToMetadatum [ ( Metadatum.String "version", Metadatum.Int Integer.one ) ]
 
         V2 ->
             Metadatum.Map <|
@@ -300,7 +298,7 @@ toMetadatum (Cip25 cip25) =
                             )
                         )
                 )
-                    ++ [ ( Metadatum.String "version", Metadatum.Int (Integer.fromSafeInt 2) ) ]
+                    ++ [ ( Metadatum.String "version", Metadatum.Int Integer.two ) ]
 
 
 v1AssetMetadataToMetadatum : ( Bytes AssetName, AssetMetadata ) -> ( Metadatum, Metadatum )
@@ -320,50 +318,27 @@ v2AssetMetadataToMetadatum ( assetName, metadata ) =
     )
 
 
-{-| Encode the CIP-0025 payload that belongs under metadata label 721.
--}
-toCbor : Cip25 -> E.Encoder
-toCbor =
-    toMetadatum >> Metadatum.toCbor
-
-
-{-| Decode the CIP-0025 payload from metadata label 721.
--}
-fromCbor : D.Decoder Cip25
-fromCbor =
-    Metadatum.fromCbor
-        |> D.andThen
-            (fromMetadatum
-                >> Maybe.map D.succeed
-                >> Maybe.withDefault D.fail
-            )
-
-
 {-| Convert the transaction metadatum under label 721 to CIP-0025.
 -}
 fromMetadatum : Metadatum -> Maybe Cip25
 fromMetadatum metadatum =
     case metadatum of
         Metadatum.Map pairs ->
-            case versionFromMetadatumPairs pairs of
-                Just V1Implicit ->
-                    decodeV1Policies (withoutVersion pairs)
-                        |> Maybe.map (\policies -> Cip25 { version = V1Implicit, policies = policies })
+            versionFromMetadatumPairs pairs
+                |> Maybe.andThen
+                    (\version ->
+                        let
+                            decodePolicies =
+                                case version of
+                                    V2 ->
+                                        decodeV2Policies
 
-                Just (V1String version) ->
-                    decodeV1Policies (withoutVersion pairs)
-                        |> Maybe.map (\policies -> Cip25 { version = V1String version, policies = policies })
-
-                Just V1Int ->
-                    decodeV1Policies (withoutVersion pairs)
-                        |> Maybe.map (\policies -> Cip25 { version = V1Int, policies = policies })
-
-                Just V2 ->
-                    decodeV2Policies (withoutVersion pairs)
-                        |> Maybe.map (\policies -> Cip25 { version = V2, policies = policies })
-
-                Nothing ->
-                    Nothing
+                                    _ ->
+                                        decodeV1Policies
+                        in
+                        decodePolicies (withoutVersion pairs)
+                            |> Maybe.map (\policies -> Cip25 { version = version, policies = policies })
+                    )
 
         _ ->
             Nothing
@@ -662,8 +637,8 @@ withFile file_ metadata =
 
 Returns `Nothing` if the MIME type string is invalid.
 
-When encoded to CBOR, entries in `otherProps` with keys `"name"`,
-`"mediaType"`, or `"src"` are ignored. Those fields are always encoded from the
+When converted to metadatum, entries in `otherProps` with keys `"name"`,
+`"mediaType"`, or `"src"` are ignored. Those fields always come from the
 dedicated record fields.
 
 -}
