@@ -151,6 +151,8 @@ type CertificateIntent
     | VoteAlwaysAbstain { delegator : Witness.Credential }
     | VoteAlwaysNoConfidence { delegator : Witness.Credential }
     | DelegateVotes { delegator : Witness.Credential, drep : Credential }
+    | RegisterAndDelegateVotes { delegator : Witness.Credential, drep : Gov.Drep, deposit : Natural }
+    | RegisterAndDelegateStakeAndVotes { delegator : Witness.Credential, poolId : Bytes Pool.Id, drep : Gov.Drep, deposit : Natural }
 
 
 {-| Register a stake credential using the deposit required by the supplied
@@ -948,6 +950,20 @@ containPlutusScripts txIntents =
             else
                 containPlutusScripts otherIntents
 
+        (IssueCertificate (RegisterAndDelegateVotes { delegator })) :: otherIntents ->
+            if Witness.credentialIsPlutusScript delegator then
+                True
+
+            else
+                containPlutusScripts otherIntents
+
+        (IssueCertificate (RegisterAndDelegateStakeAndVotes { delegator })) :: otherIntents ->
+            if Witness.credentialIsPlutusScript delegator then
+                True
+
+            else
+                containPlutusScripts otherIntents
+
         (WithdrawRewards { scriptWitness }) :: otherIntents ->
             case scriptWitness of
                 Just (Witness.Plutus _) ->
@@ -1671,6 +1687,14 @@ validateProtocolIntents protocolParameters txIntents =
                     requireDeposit StakeDepositMismatch protocolParameters.keyDeposit deposit
                         |> Result.andThen validateRemaining
 
+                IssueCertificate (RegisterAndDelegateVotes { deposit }) ->
+                    requireDeposit StakeDepositMismatch protocolParameters.keyDeposit deposit
+                        |> Result.andThen validateRemaining
+
+                IssueCertificate (RegisterAndDelegateStakeAndVotes { deposit }) ->
+                    requireDeposit StakeDepositMismatch protocolParameters.keyDeposit deposit
+                        |> Result.andThen validateRemaining
+
                 IssueCertificate (RegisterDrep { deposit }) ->
                     requireDeposit DrepDepositMismatch protocolParameters.drepDeposit deposit
                         |> Result.andThen validateRemaining
@@ -1895,6 +1919,22 @@ preProcessIntents txIntents =
                         (\keyCred -> VoteDelegCert { delegator = VKeyHash keyCred, drep = DrepCredential drep })
                         (\scriptHash -> VoteDelegCert { delegator = ScriptHash scriptHash, drep = DrepCredential drep })
                         { deposit = Natural.zero, refund = Natural.zero }
+                        delegator
+                        preProcessedIntents
+
+                IssueCertificate (RegisterAndDelegateVotes { delegator, drep, deposit }) ->
+                    preprocessCert
+                        (\keyCred -> VoteRegDelegCert { delegator = VKeyHash keyCred, drep = drep, deposit = deposit })
+                        (\scriptHash -> VoteRegDelegCert { delegator = ScriptHash scriptHash, drep = drep, deposit = deposit })
+                        { deposit = deposit, refund = Natural.zero }
+                        delegator
+                        preProcessedIntents
+
+                IssueCertificate (RegisterAndDelegateStakeAndVotes { delegator, poolId, drep, deposit }) ->
+                    preprocessCert
+                        (\keyCred -> StakeVoteRegDelegCert { delegator = VKeyHash keyCred, poolId = poolId, drep = drep, deposit = deposit })
+                        (\scriptHash -> StakeVoteRegDelegCert { delegator = ScriptHash scriptHash, poolId = poolId, drep = drep, deposit = deposit })
+                        { deposit = deposit, refund = Natural.zero }
                         delegator
                         preProcessedIntents
 
