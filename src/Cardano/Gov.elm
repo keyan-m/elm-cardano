@@ -656,8 +656,8 @@ decodeProtocolParamUpdate =
             >> D.optionalField 31 D.natural
             -- drepActivity : Maybe Natural -- 32
             >> D.optionalField 32 D.natural
-            -- minFeeRefScriptCostPerByte : Maybe RationalNumber -- 33
-            >> D.optionalField 33 decodeRational
+            -- minFeeRefScriptCostPerByte : Maybe Int -- 33
+            >> D.optionalField 33 D.int
 
 
 {-| Decoder for PoolVotingThresholds type.
@@ -742,7 +742,7 @@ type alias ProtocolParamUpdate =
     , governanceActionDeposit : Maybe Natural -- 30
     , drepDeposit : Maybe Natural -- 31
     , drepInactivityPeriod : Maybe Natural -- 32
-    , minFeeRefScriptCostPerByte : Maybe RationalNumber -- 33
+    , minFeeRefScriptCostPerByte : Maybe Int -- 33
     }
 
 
@@ -1048,7 +1048,7 @@ encodeProtocolParamUpdate =
             >> E.optionalField 30 EE.natural .governanceActionDeposit
             >> E.optionalField 31 EE.natural .drepDeposit
             >> E.optionalField 32 EE.natural .drepInactivityPeriod
-            >> E.optionalField 33 encodeRationalNumber .minFeeRefScriptCostPerByte
+            >> E.optionalField 33 E.int .minFeeRefScriptCostPerByte
 
 
 {-| Encoder for Voter type.
