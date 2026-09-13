@@ -33,6 +33,22 @@ suite =
             [ test "field 33 rational CBOR round trip" protocolParamUpdateField33RoundTrip
             , test "field 33 uses the tagged rational encoding" protocolParamUpdateField33Encoding
             ]
+        , describe "DRep CBOR encoding"
+            [ test "AlwaysAbstain uses a single-element array" <|
+                \_ ->
+                    Gov.encodeDrep Gov.AlwaysAbstain
+                        |> E.encode
+                        |> Bytes.fromBytes
+                        |> Bytes.toHex
+                        |> Expect.equal "8102"
+            , test "AlwaysNoConfidence uses a single-element array" <|
+                \_ ->
+                    Gov.encodeDrep Gov.AlwaysNoConfidence
+                        |> E.encode
+                        |> Bytes.fromBytes
+                        |> Bytes.toHex
+                        |> Expect.equal "8103"
+            ]
         ]
 
 

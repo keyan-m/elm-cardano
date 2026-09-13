@@ -10,7 +10,7 @@ import Cardano.Metadatum as Metadatum
 import Cardano.MultiAsset as MultiAsset exposing (PolicyId)
 import Cardano.Pool as Pool
 import Cardano.ProtocolParameters as ProtocolParameters exposing (ProtocolParameters)
-import Cardano.Redeemer exposing (Redeemer)
+import Cardano.Redeemer as Redeemer exposing (Redeemer)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction, newBody, newWitnessSet)
 import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), Fee(..), GovernanceState, ProtocolRuleError(..), SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
@@ -28,6 +28,7 @@ suite : Test
 suite =
     describe "Cardano Tx building"
         [ okTxBuilding
+        , combinedRegistrationTests
         , failTxBuilding
         , balanceIntents
         , protocolParameterIntegration
@@ -638,6 +639,151 @@ balanceIntents =
         ]
 
 
+combinedRegistrationTests : Test
+combinedRegistrationTests =
+    describe "Combined registration and delegation"
+        [ combinedRegistrationTest "register and delegate stake"
+            (\delegator ->
+                RegisterAndDelegateStake
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , deposit = ada 2
+                    }
+            )
+            (\delegator ->
+                StakeRegDelegCert
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , deposit = ada 2
+                    }
+            )
+        , combinedRegistrationTest "register and delegate votes"
+            (\delegator ->
+                RegisterAndDelegateVotes
+                    { delegator = delegator, drep = AlwaysAbstain, deposit = ada 2 }
+            )
+            (\delegator ->
+                VoteRegDelegCert
+                    { delegator = delegator, drep = AlwaysAbstain, deposit = ada 2 }
+            )
+        , combinedRegistrationTest "register and delegate stake and votes"
+            (\delegator ->
+                RegisterAndDelegateStakeAndVotes
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , drep = AlwaysNoConfidence
+                    , deposit = ada 2
+                    }
+            )
+            (\delegator ->
+                StakeVoteRegDelegCert
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , drep = AlwaysNoConfidence
+                    , deposit = ada 2
+                    }
+            )
+        ]
+
+
+combinedRegistrationTest : String -> (Witness.Credential -> CertificateIntent) -> (Address.Credential -> Certificate) -> Test
+combinedRegistrationTest description makeIntent makeCertificate =
+    let
+        stakeKeyHash =
+            dummyCredentialHash "stk-me"
+
+        intents delegator =
+            [ Spend <|
+                FromWallet
+                    { address = testAddr.me
+                    , value = Value.onlyLovelace (ada 2)
+                    , guaranteedUtxos = []
+                    }
+            , IssueCertificate (makeIntent delegator)
+            ]
+    in
+    describe description
+        [ okTxTest "with a key credential, one deposit and the stake-key signature"
+            { govState = TxIntent.emptyGovernanceState
+            , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
+            , evalScriptsCosts = \_ _ -> Ok []
+            , fee = twoAdaFee
+            , txOtherInfo = []
+            , txIntents = intents (WithKey stakeKeyHash)
+            }
+            (\_ ->
+                { tx =
+                    { newTx
+                        | body =
+                            { newBody
+                                | inputs = [ makeRef "0" 0 ]
+                                , outputs = [ Utxo.fromLovelace testAddr.me (ada 1) ]
+                                , fee = ada 2
+                                , certificates = [ makeCertificate (VKeyHash stakeKeyHash) ]
+                            }
+                    }
+                , expectedSignatures = [ dummyCredentialHash "key-me", stakeKeyHash ]
+                }
+            )
+        , test "evaluates a Plutus credential through the default finalizer" <|
+            \_ ->
+                let
+                    localStateUtxos =
+                        Utxo.refDictFromList
+                            [ makeAdaOutput 0 testAddr.me 20
+                            , makeAdaOutput 1 testAddr.me 5
+                            ]
+
+                    -- This certificate is the only Plutus use, so its intent must
+                    -- trigger script detection in the default evaluator.
+                    delegator =
+                        WithScript indexedScript.hash <|
+                            Witness.Plutus (indexedScript.witness 0)
+                in
+                case TxIntent.finalize localStateUtxos [] (intents delegator) of
+                    Err error ->
+                        Expect.fail (TxIntent.errorToString error)
+
+                    Ok finalized ->
+                        Expect.all
+                            [ \{ tx } ->
+                                Expect.equal
+                                    [ makeCertificate (ScriptHash indexedScript.hash) ]
+                                    tx.body.certificates
+                            , \{ tx } ->
+                                Expect.equal
+                                    [ Utxo.fromLovelace testAddr.me (Natural.sub (ada 18) tx.body.fee) ]
+                                    tx.body.outputs
+                            , \{ tx } ->
+                                Expect.equal
+                                    (Just [ Script.cborWrappedBytes indexedScript.plutus ])
+                                    tx.witnessSet.plutusV3Script
+                            , \{ tx } ->
+                                Expect.equal [ makeRef "1" 1 ] tx.body.collateral
+                            , \{ tx } ->
+                                Expect.notEqual Nothing tx.body.scriptDataHash
+                            , \{ expectedSignatures } ->
+                                Expect.equal [ dummyCredentialHash "key-me" ] expectedSignatures
+                            , \{ tx } ->
+                                case tx.witnessSet.redeemer of
+                                    Just [ redeemer ] ->
+                                        Expect.all
+                                            [ \r ->
+                                                Expect.equal
+                                                    ( Redeemer.Cert, 0, Data.Int Integer.zero )
+                                                    ( r.tag, r.index, r.data )
+                                            , \r -> Expect.greaterThan 0 r.exUnits.mem
+                                            , \r -> Expect.greaterThan 0 r.exUnits.steps
+                                            ]
+                                            redeemer
+
+                                    _ ->
+                                        Expect.fail "Expected exactly one evaluated certificate redeemer"
+                            ]
+                            finalized
+        ]
+
+
 okTxBuilding : Test
 okTxBuilding =
     describe "Successfull"
@@ -1099,88 +1245,6 @@ okTxBuilding =
                     [ dummyCredentialHash "key-me"
                     , dummyCredentialHash "stk-me"
                     ]
-                }
-            )
-
-        -- Test with stake registration and pool delegation in a single certificate
-        , let
-            myStakeKeyHash =
-                Address.extractStakeKeyHash testAddr.me
-                    |> Maybe.withDefault (dummyCredentialHash "ERROR")
-          in
-          okTxTest "Test with combined stake registration and pool delegation"
-            { govState = TxIntent.emptyGovernanceState
-            , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
-            , evalScriptsCosts = \_ _ -> Ok []
-            , fee = twoAdaFee
-            , txOtherInfo = []
-            , txIntents =
-                [ Spend <|
-                    FromWallet
-                        { address = testAddr.me
-                        , value = Value.onlyLovelace (ada 2) -- 2 ada for the registration deposit
-                        , guaranteedUtxos = []
-                        }
-                , IssueCertificate <|
-                    RegisterAndDelegateStake
-                        { delegator = WithKey myStakeKeyHash
-                        , poolId = Bytes.dummy 28 "poolId"
-                        , deposit = ada 2
-                        }
-                ]
-            }
-            (\_ ->
-                { tx =
-                    { newTx
-                        | body =
-                            { newBody
-                                | fee = ada 2
-                                , inputs = [ makeRef "0" 0 ]
-                                , outputs = [ Utxo.fromLovelace testAddr.me (ada 1) ]
-                                , certificates =
-                                    [ StakeRegDelegCert
-                                        { delegator = VKeyHash myStakeKeyHash
-                                        , poolId = Bytes.dummy 28 "poolId"
-                                        , deposit = Natural.fromSafeInt 2000000
-                                        }
-                                    ]
-                            }
-                    }
-                , expectedSignatures =
-                    [ dummyCredentialHash "key-me"
-                    , dummyCredentialHash "stk-me"
-                    ]
-                }
-            )
-        , okTxTest "builds combined stake registration and delegation with a Plutus credential"
-            { govState = TxIntent.emptyGovernanceState
-            , localStateUtxos =
-                [ makeAdaOutput 0 testAddr.me 5
-                , makeAdaOutput 89 testAddr.me 5
-                ]
-            , evalScriptsCosts = Uplc.evalScriptsCosts Uplc.defaultVmConfig
-            , fee = twoAdaFee
-            , txOtherInfo = []
-            , txIntents =
-                [ Spend <|
-                    FromWallet
-                        { address = testAddr.me
-                        , value = Value.onlyLovelace (ada 2)
-                        , guaranteedUtxos = []
-                        }
-                , IssueCertificate <|
-                    RegisterAndDelegateStake
-                        { delegator =
-                            WithScript indexedScript.hash <|
-                                Witness.Plutus (indexedScript.witness 0)
-                        , poolId = Bytes.dummy 28 "poolId"
-                        , deposit = ada 2
-                        }
-                ]
-            }
-            (\{ tx } ->
-                { tx = tx
-                , expectedSignatures = [ dummyCredentialHash "key-me" ]
                 }
             )
 
