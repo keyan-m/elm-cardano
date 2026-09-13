@@ -881,10 +881,10 @@ encodeDrep drep =
             Address.credentialToCbor cred
 
         AlwaysAbstain ->
-            E.int 2
+            E.list E.int [ 2 ]
 
         AlwaysNoConfidence ->
-            E.int 3
+            E.list E.int [ 3 ]
 
 
 {-| Encoder for Anchor type.

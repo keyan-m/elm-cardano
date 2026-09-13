@@ -8,7 +8,7 @@ import Cardano.Data as Data
 import Cardano.Gov as Gov exposing (Drep(..), Vote(..), Voter(..), noParamUpdate)
 import Cardano.Metadatum as Metadatum
 import Cardano.MultiAsset as MultiAsset exposing (PolicyId)
-import Cardano.Redeemer exposing (Redeemer)
+import Cardano.Redeemer as Redeemer exposing (Redeemer)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction, newBody, newWitnessSet)
 import Cardano.TxIntent as TxIntent exposing (ActionProposal(..), CertificateIntent(..), Fee(..), GovernanceState, SpendSource(..), TxFinalizationError(..), TxFinalized, TxIntent(..), TxOtherInfo(..), finalizeAdvanced)
@@ -26,6 +26,7 @@ suite : Test
 suite =
     describe "Cardano Tx building"
         [ okTxBuilding
+        , combinedRegistrationTests
         , failTxBuilding
         , balanceIntents
         ]
@@ -57,6 +58,136 @@ balanceIntents =
             \_ ->
                 balanceWithMe [ receiveAda 1 ]
                     |> Expect.equal (Ok [ receiveAda 0, spendAda 1, receiveAda 1 ])
+        ]
+
+
+combinedRegistrationTests : Test
+combinedRegistrationTests =
+    describe "Combined registration and vote delegation"
+        [ combinedRegistrationTest "register and delegate votes"
+            (\delegator ->
+                RegisterAndDelegateVotes
+                    { delegator = delegator, drep = AlwaysAbstain, deposit = ada 2 }
+            )
+            (\delegator ->
+                VoteRegDelegCert
+                    { delegator = delegator, drep = AlwaysAbstain, deposit = ada 2 }
+            )
+        , combinedRegistrationTest "register and delegate stake and votes"
+            (\delegator ->
+                RegisterAndDelegateStakeAndVotes
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , drep = AlwaysNoConfidence
+                    , deposit = ada 2
+                    }
+            )
+            (\delegator ->
+                StakeVoteRegDelegCert
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , drep = AlwaysNoConfidence
+                    , deposit = ada 2
+                    }
+            )
+        ]
+
+
+combinedRegistrationTest : String -> (Witness.Credential -> CertificateIntent) -> (Address.Credential -> Certificate) -> Test
+combinedRegistrationTest description makeIntent makeCertificate =
+    let
+        stakeKeyHash =
+            dummyCredentialHash "stk-me"
+
+        intents delegator =
+            [ Spend <|
+                FromWallet
+                    { address = testAddr.me
+                    , value = Value.onlyLovelace (ada 2)
+                    , guaranteedUtxos = []
+                    }
+            , IssueCertificate (makeIntent delegator)
+            ]
+    in
+    describe description
+        [ okTxTest "with a key credential, one deposit and the stake-key signature"
+            { govState = TxIntent.emptyGovernanceState
+            , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
+            , evalScriptsCosts = \_ _ -> Ok []
+            , fee = twoAdaFee
+            , txOtherInfo = []
+            , txIntents = intents (WithKey stakeKeyHash)
+            }
+            (\_ ->
+                { tx =
+                    { newTx
+                        | body =
+                            { newBody
+                                | inputs = [ makeRef "0" 0 ]
+                                , outputs = [ Utxo.fromLovelace testAddr.me (ada 1) ]
+                                , fee = ada 2
+                                , certificates = [ makeCertificate (VKeyHash stakeKeyHash) ]
+                            }
+                    }
+                , expectedSignatures = [ dummyCredentialHash "key-me", stakeKeyHash ]
+                }
+            )
+        , test "evaluates a Plutus credential through the default finalizer" <|
+            \_ ->
+                let
+                    localStateUtxos =
+                        Utxo.refDictFromList
+                            [ makeAdaOutput 0 testAddr.me 20
+                            , makeAdaOutput 1 testAddr.me 5
+                            ]
+
+                    -- This certificate is the only Plutus use, so its intent must
+                    -- trigger script detection in the default evaluator.
+                    delegator =
+                        WithScript indexedScript.hash <|
+                            Witness.Plutus (indexedScript.witness 0)
+                in
+                case TxIntent.finalize localStateUtxos [] (intents delegator) of
+                    Err error ->
+                        Expect.fail (TxIntent.errorToString error)
+
+                    Ok finalized ->
+                        Expect.all
+                            [ \{ tx } ->
+                                Expect.equal
+                                    [ makeCertificate (ScriptHash indexedScript.hash) ]
+                                    tx.body.certificates
+                            , \{ tx } ->
+                                Expect.equal
+                                    [ Utxo.fromLovelace testAddr.me (Natural.sub (ada 18) tx.body.fee) ]
+                                    tx.body.outputs
+                            , \{ tx } ->
+                                Expect.equal
+                                    (Just [ Script.cborWrappedBytes indexedScript.plutus ])
+                                    tx.witnessSet.plutusV3Script
+                            , \{ tx } ->
+                                Expect.equal [ makeRef "1" 1 ] tx.body.collateral
+                            , \{ tx } ->
+                                Expect.notEqual Nothing tx.body.scriptDataHash
+                            , \{ expectedSignatures } ->
+                                Expect.equal [ dummyCredentialHash "key-me" ] expectedSignatures
+                            , \{ tx } ->
+                                case tx.witnessSet.redeemer of
+                                    Just [ redeemer ] ->
+                                        Expect.all
+                                            [ \r ->
+                                                Expect.equal
+                                                    ( Redeemer.Cert, 0, Data.Int Integer.zero )
+                                                    ( r.tag, r.index, r.data )
+                                            , \r -> Expect.greaterThan 0 r.exUnits.mem
+                                            , \r -> Expect.greaterThan 0 r.exUnits.steps
+                                            ]
+                                            redeemer
+
+                                    _ ->
+                                        Expect.fail "Expected exactly one evaluated certificate redeemer"
+                            ]
+                            finalized
         ]
 
 

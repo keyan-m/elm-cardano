@@ -3,6 +3,7 @@ module Cardano.GovTests exposing (suite)
 import Bytes.Comparable as Bytes
 import Cardano.Address exposing (Credential(..))
 import Cardano.Gov as Gov
+import Cbor.Encode as E
 import Expect exposing (Expectation)
 import Test exposing (Test, describe, test)
 
@@ -26,6 +27,22 @@ suite =
             , test "Cc hot" ccHotBech32EncodingTest
             , test "Cc cold" ccColdBech32EncodingTest
             , test "DRep" drepBech32EncodingTest
+            ]
+        , describe "DRep CBOR encoding"
+            [ test "AlwaysAbstain uses a single-element array" <|
+                \_ ->
+                    Gov.encodeDrep Gov.AlwaysAbstain
+                        |> E.encode
+                        |> Bytes.fromBytes
+                        |> Bytes.toHex
+                        |> Expect.equal "8102"
+            , test "AlwaysNoConfidence uses a single-element array" <|
+                \_ ->
+                    Gov.encodeDrep Gov.AlwaysNoConfidence
+                        |> E.encode
+                        |> Bytes.fromBytes
+                        |> Bytes.toHex
+                        |> Expect.equal "8103"
             ]
         ]
 
