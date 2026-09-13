@@ -63,8 +63,23 @@ balanceIntents =
 
 combinedRegistrationTests : Test
 combinedRegistrationTests =
-    describe "Combined registration and vote delegation"
-        [ combinedRegistrationTest "register and delegate votes"
+    describe "Combined registration and delegation"
+        [ combinedRegistrationTest "register and delegate stake"
+            (\delegator ->
+                RegisterAndDelegateStake
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , deposit = ada 2
+                    }
+            )
+            (\delegator ->
+                StakeRegDelegCert
+                    { delegator = delegator
+                    , poolId = Bytes.dummy 28 "poolId"
+                    , deposit = ada 2
+                    }
+            )
+        , combinedRegistrationTest "register and delegate votes"
             (\delegator ->
                 RegisterAndDelegateVotes
                     { delegator = delegator, drep = AlwaysAbstain, deposit = ada 2 }
@@ -652,79 +667,6 @@ okTxBuilding =
                     [ dummyCredentialHash "key-me"
                     , dummyCredentialHash "stk-me"
                     ]
-                }
-            )
-
-        -- Test with stake registration and pool delegation in a single certificate
-        , let
-            myStakeKeyHash =
-                Address.extractStakeKeyHash testAddr.me
-                    |> Maybe.withDefault (dummyCredentialHash "ERROR")
-          in
-          okTxTest "Test with combined stake registration and pool delegation"
-            { govState = TxIntent.emptyGovernanceState
-            , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
-            , evalScriptsCosts = \_ _ -> Ok []
-            , fee = twoAdaFee
-            , txOtherInfo = []
-            , txIntents =
-                [ Spend <|
-                    FromWallet
-                        { address = testAddr.me
-                        , value = Value.onlyLovelace (ada 2) -- 2 ada for the registration deposit
-                        , guaranteedUtxos = []
-                        }
-                , IssueCertificate <|
-                    RegisterAndDelegateStake
-                        { delegator = WithKey myStakeKeyHash
-                        , poolId = Bytes.dummy 28 "poolId"
-                        , deposit = ada 2
-                        }
-                ]
-            }
-            (\_ ->
-                { tx =
-                    { newTx
-                        | body =
-                            { newBody
-                                | fee = ada 2
-                                , inputs = [ makeRef "0" 0 ]
-                                , outputs = [ Utxo.fromLovelace testAddr.me (ada 1) ]
-                                , certificates =
-                                    [ StakeRegDelegCert
-                                        { delegator = VKeyHash myStakeKeyHash
-                                        , poolId = Bytes.dummy 28 "poolId"
-                                        , deposit = Natural.fromSafeInt 2000000
-                                        }
-                                    ]
-                            }
-                    }
-                , expectedSignatures =
-                    [ dummyCredentialHash "key-me"
-                    , dummyCredentialHash "stk-me"
-                    ]
-                }
-            )
-        , okTxTest "builds combined stake registration and delegation with a Plutus credential"
-            { govState = TxIntent.emptyGovernanceState
-            , localStateUtxos = [ makeAdaOutput 0 testAddr.me 5 ]
-            , evalScriptsCosts = Uplc.evalScriptsCosts Uplc.defaultVmConfig
-            , fee = twoAdaFee
-            , txOtherInfo = []
-            , txIntents =
-                [ IssueCertificate <|
-                    RegisterAndDelegateStake
-                        { delegator =
-                            WithScript indexedScript.hash <|
-                                Witness.Plutus (indexedScript.witness 0)
-                        , poolId = Bytes.dummy 28 "poolId"
-                        , deposit = Natural.zero
-                        }
-                ]
-            }
-            (\{ tx } ->
-                { tx = tx
-                , expectedSignatures = [ dummyCredentialHash "key-me" ]
                 }
             )
 
