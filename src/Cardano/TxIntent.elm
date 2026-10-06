@@ -1169,9 +1169,6 @@ finalizeAdvancedValidated protocolParameters { govState, localStateUtxos, coinSe
                                     |> Result.andThen
                                         (\coinSelection ->
                                             let
-                                                updatedTxContext =
-                                                    updateTxContext coinSelection
-
                                                 selectCollateral =
                                                     case processedOtherInfo.collateralWithoutReturn of
                                                         Nothing ->
@@ -1220,7 +1217,7 @@ finalizeAdvancedValidated protocolParameters { govState, localStateUtxos, coinSe
                                             selectCollateral
                                                 |> Result.map
                                                     (\collateralSelection ->
-                                                        buildTx feeAmount collateralSelection processedIntents processedOtherInfo updatedTxContext
+                                                        buildTx feeAmount collateralSelection processedIntents processedOtherInfo (updateTxContext coinSelection)
                                                     )
                                         )
 

@@ -4,7 +4,7 @@ set -eu
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 package_dir="$project_root/cli/pkg-uplc-wasm"
 # keyan-m/uplc-wasm, branch fix/wasm-memory-growth.
-revision=ea70fd82999140890b0025d7aca6a682d2591a63
+revision=8982704804f45b2b27f6323814f333b66dc7b14e
 
 if [ -f "$package_dir/.revision" ] \
     && [ "$(cat "$package_dir/.revision")" = "$revision" ] \
