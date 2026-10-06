@@ -60,20 +60,92 @@ type Reference
 
 {-| Create a Script Reference from the script bytes.
 Returns Nothing if the bytes are not a valid script.
+Native script hashes use the original encoded script; Plutus script hashes
+use the contents of the outer CBOR byte string.
 -}
 refFromBytes : Bytes Script -> Maybe Reference
 refFromBytes bytes =
     let
         scriptHashDecoder =
-            D.length
-                |> D.ignoreThen (D.map2 computeScriptHash D.raw D.bytes)
+            D.tuple Tuple.pair
+                (D.elems
+                    >> D.elem D.int
+                    >> D.elem D.raw
+                )
+                |> D.andThen
+                    (\( scriptType, encodedScript ) ->
+                        let
+                            scriptBytes =
+                                if scriptType == 0 then
+                                    D.decode decodeNativeScript encodedScript
+                                        |> Maybe.andThen (\_ -> nativeReferencePayload bytes)
+                                        |> Maybe.map Bytes.toBytes
 
-        computeScriptHash rawScriptType scriptBytes =
-            Bytes.concat (Bytes.fromBytes rawScriptType) (Bytes.fromBytes scriptBytes)
+                                else if List.member scriptType [ 1, 2, 3 ] then
+                                    D.decode D.bytes encodedScript
+
+                                else
+                                    Nothing
+                        in
+                        case scriptBytes of
+                            Just decodedBytes ->
+                                D.succeed (computeScriptHash scriptType decodedBytes)
+
+                            Nothing ->
+                                D.fail
+                    )
+
+        computeScriptHash scriptType scriptBytes =
+            Bytes.concat (Bytes.fromU8 [ scriptType ]) (Bytes.fromBytes scriptBytes)
                 |> Bytes.blake2b224
     in
     D.decode scriptHashDecoder (Bytes.toBytes bytes)
         |> Maybe.map (\scriptHash -> Reference { scriptHash = scriptHash, bytes = bytes })
+
+
+nativeReferencePayload : Bytes Script -> Maybe (Bytes ScriptCbor)
+nativeReferencePayload bytes =
+    let
+        source =
+            Bytes.toU8 bytes
+
+        -- Cbor.Decode.raw re-encodes its result. Hash the source payload instead.
+        headerWidth first =
+            case modBy 32 first of
+                24 ->
+                    2
+
+                25 ->
+                    3
+
+                26 ->
+                    5
+
+                27 ->
+                    9
+
+                _ ->
+                    1
+    in
+    List.head source
+        |> Maybe.andThen
+            (\arrayHeader ->
+                source
+                    |> List.drop (headerWidth arrayHeader)
+                    |> List.head
+                    |> Maybe.map
+                        (\versionHeader ->
+                            source
+                                |> List.drop (headerWidth arrayHeader + headerWidth versionHeader)
+                                |> (if arrayHeader == 159 then
+                                        List.take (List.length source - headerWidth arrayHeader - headerWidth versionHeader - 1)
+
+                                    else
+                                        identity
+                                   )
+                                |> Bytes.fromU8
+                        )
+            )
 
 
 {-| Create a Script Reference from a Script (using elm-cardano encoding approach).
@@ -490,25 +562,33 @@ That part has to be handled in the UTxO decoder.
 -}
 fromCbor : D.Decoder Script
 fromCbor =
-    D.length
-        |> D.ignoreThen D.int
+    D.tuple Tuple.pair (D.elems >> D.elem D.int >> D.elem D.raw)
         |> D.andThen
-            (\v ->
-                case v of
-                    0 ->
-                        D.map Native decodeNativeScript
+            (\( version, scriptBytes ) ->
+                let
+                    scriptDecoder =
+                        case version of
+                            0 ->
+                                D.map Native decodeNativeScript
 
-                    1 ->
-                        D.map Plutus (plutusFromCbor PlutusV1)
+                            1 ->
+                                D.map Plutus (plutusFromCbor PlutusV1)
 
-                    2 ->
-                        D.map Plutus (plutusFromCbor PlutusV2)
+                            2 ->
+                                D.map Plutus (plutusFromCbor PlutusV2)
 
-                    3 ->
-                        D.map Plutus (plutusFromCbor PlutusV3)
+                            3 ->
+                                D.map Plutus (plutusFromCbor PlutusV3)
 
-                    _ ->
-                        D.failWith ("Unknown script version: " ++ String.fromInt v)
+                            _ ->
+                                D.failWith ("Unknown script version: " ++ String.fromInt version)
+                in
+                case D.decode scriptDecoder scriptBytes of
+                    Just script ->
+                        D.succeed script
+
+                    Nothing ->
+                        D.fail
             )
 
 
