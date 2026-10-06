@@ -103,17 +103,20 @@ discussing first over in the
 
 [elm-cardano-channel]: https://discord.gg/UgXYyy9dHg
 
-The elm-cardano cli is built using the rust language.
-To build successfully, it attempts to statically load the WASM files for Aiken UPLC virtual machine.
-So we first need to download these files locally, then we can compile (in release).
-```sh
-# Download the uplc-wasm archive
-curl -LO 'https://github.com/mpizenberg/uplc-wasm/releases/download/v0.3.1/my-artifact.zip'
-unzip my-artifact.zip -d cli/pkg-uplc-wasm
+The elm-cardano CLI embeds the Node and browser WASM packages built from a pinned
+commit on the `fix/wasm-memory-growth` branch of
+[keyan-m/uplc-wasm](https://github.com/keyan-m/uplc-wasm/tree/fix/wasm-memory-growth).
+The evaluator uses Rust’s default allocator. Building requires Rust with the
+`wasm32-unknown-unknown` target, wasm-pack 0.15.0, clang, llvm-ar, curl, tar, and jq.
 
-# Build the elm-cardano cli
-cargo build --release
+```sh
+rustup target add wasm32-unknown-unknown
+./scripts/build-uplc-wasm.sh
+cargo build --locked --release
 ```
+
+The script caches the packages by source revision. Run it before rebuilding the
+CLI whenever the pinned evaluator revision changes.
 
 Now you can put that `target/release/elm-cardano` binary somewhere in your path.
 Or better, put a link to it somewhere in your path.

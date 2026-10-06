@@ -33,9 +33,14 @@ jobs:
               id: set-matrix
               run: echo matrix={"include":$(cat $TARGETS_JSON)} >> $GITHUB_OUTPUT
 
+    build-uplc-wasm:
+        needs: check-release
+        if: ${{ needs.check-release.outputs.is_release == 'true' }}
+        uses: ./.github/workflows/uplc-wasm.yml
+
     # Build binaries
     build:
-        needs: [prepare-config]
+        needs: [prepare-config, build-uplc-wasm]
         name: Build ${{ matrix.name }}
         runs-on: ${{ matrix.os }}
         strategy:
@@ -45,9 +50,10 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
-            - name: Download the uplc-wasm archive
-              run: curl -LO 'https://github.com/mpizenberg/uplc-wasm/releases/download/v0.3.1/my-artifact.zip'
-            - run: unzip my-artifact.zip -d cli/pkg-uplc-wasm
+            - uses: actions/download-artifact@v4
+              with:
+                  name: uplc-wasm
+                  path: cli/pkg-uplc-wasm
 
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
@@ -127,7 +133,7 @@ jobs:
 
                   # Copy all artifacts
                   for dir in artifacts/*; do
-                    if [ -d "$dir" ] && [ "$(basename "$dir")" != "npm-package-tarball" ]; then
+                    if [ -d "$dir" ] && [ "$(basename "$dir")" != "npm-package-tarball" ] && [ "$(basename "$dir")" != "uplc-wasm" ]; then
                       cp -r $dir/* release/
                     fi
                   done

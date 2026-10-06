@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - develop
   pull_request:
 
 jobs:
@@ -17,14 +18,19 @@ jobs:
           cache-restore-key: elm-home-make
       - run: elm make
 
+  build-uplc-wasm:
+    uses: ./.github/workflows/uplc-wasm.yml
+
   build-elm-cardano:
+    needs: build-uplc-wasm
     name: Build elm-cardano binary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Download the uplc-wasm archive
-        run: curl -LO 'https://github.com/mpizenberg/uplc-wasm/releases/download/v0.3.1/my-artifact.zip'
-      - run: unzip my-artifact.zip -d cli/pkg-uplc-wasm
+      - uses: actions/download-artifact@v4
+        with:
+          name: uplc-wasm
+          path: cli/pkg-uplc-wasm
 
       - uses: dtolnay/rust-toolchain@stable
       - name: build elm-cardano
