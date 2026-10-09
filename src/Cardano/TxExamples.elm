@@ -22,7 +22,7 @@ import Cardano.MultiAsset as MultiAsset
 import Cardano.Redeemer as Redeemer exposing (ExUnitPrices, ExUnits)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Certificate(..), Transaction)
-import Cardano.TxIntent exposing (ActionProposal(..), CertificateIntent(..), Fee(..), SpendSource(..), TxIntent(..), TxOtherInfo(..), finalize, finalizeAdvanced)
+import Cardano.TxIntent exposing (ActionProposal(..), CertificateIntent(..), Fee(..), SpendSource(..), TxIntent(..), TxOtherInfo(..), defaultCollateralOptions, finalize, finalizeAdvanced)
 import Cardano.Uplc as Uplc
 import Cardano.Utils exposing (RationalNumber)
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
@@ -343,6 +343,7 @@ example5 _ =
             , costModels = Uplc.conwayDefaultCostModels
             }
             (AutoFee { paymentSource = exAddr.me })
+            defaultCollateralOptions
             []
 
 

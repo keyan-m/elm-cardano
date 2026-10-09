@@ -1,12 +1,13 @@
 module Cardano.TxIntent exposing
     ( balance, finalize, finalizeWithProtocolParameters, finalizeAdvanced, finalizeAdvancedWithProtocolParameters
-    , TxFinalized, TxFinalizationError(..), ProtocolRuleError(..), errorToString
+    , TxFinalized, TxFinalizationError(..), ProtocolRuleError(..), CollateralFailure(..), errorToString
     , TxIntent(..), SpendSource(..)
     , CertificateIntent(..), registerStakeWithProtocolDeposit, registerDrepWithProtocolDeposit, registerNewPool, updatePool
     , VoteIntent, ProposalIntent, ActionProposal(..)
     , proposalWithProtocolDeposit
     , TxOtherInfo(..)
     , Fee(..)
+    , CollateralInputs(..), CollateralReturn(..), CollateralOptions, defaultCollateralOptions
     , GovernanceState, emptyGovernanceState
     , defaultEvalScriptsCosts
     , updateLocalState
@@ -43,13 +44,14 @@ and finally trying to validate it and auto-populate all requirements.
 # Code Documentation
 
 @docs balance, finalize, finalizeWithProtocolParameters, finalizeAdvanced, finalizeAdvancedWithProtocolParameters
-@docs TxFinalized, TxFinalizationError, ProtocolRuleError, errorToString
+@docs TxFinalized, TxFinalizationError, ProtocolRuleError, CollateralFailure, errorToString
 @docs TxIntent, SpendSource
 @docs CertificateIntent, registerStakeWithProtocolDeposit, registerDrepWithProtocolDeposit, registerNewPool, updatePool
 @docs VoteIntent, ProposalIntent, ActionProposal
 @docs proposalWithProtocolDeposit
 @docs TxOtherInfo
 @docs Fee
+@docs CollateralInputs, CollateralReturn, CollateralOptions, defaultCollateralOptions
 @docs GovernanceState, emptyGovernanceState
 @docs defaultEvalScriptsCosts
 @docs updateLocalState
@@ -254,7 +256,6 @@ type TxOtherInfo
     | TxRequiredSigner (Bytes CredentialHash)
     | TxMetadata { tag : Natural, metadata : Metadatum }
     | TxTimeValidityRange { start : Int, end : Natural }
-    | TxCollateralWithoutReturn OutputReference
 
 
 {-| Configure fees manually or automatically for a transaction.
@@ -262,6 +263,41 @@ type TxOtherInfo
 type Fee
     = ManualFee (List { paymentSource : Address, exactFeeAmount : Natural })
     | AutoFee { paymentSource : Address }
+
+
+{-| Configure how collateral inputs are selected.
+-}
+type CollateralInputs
+    = AutomaticCollateral
+    | ManualCollateral OutputReference (List OutputReference)
+
+
+{-| Configure whether excess collateral is returned.
+
+Without a return, the transaction omits the total collateral field and all
+selected collateral is at risk if script validation fails.
+
+-}
+type CollateralReturn
+    = ReturnExcess
+    | NoCollateralReturn
+
+
+{-| Collateral configuration for transaction finalization.
+-}
+type alias CollateralOptions =
+    { inputs : CollateralInputs
+    , return : CollateralReturn
+    }
+
+
+{-| Use automatic collateral selection and return any excess value.
+-}
+defaultCollateralOptions : CollateralOptions
+defaultCollateralOptions =
+    { inputs = AutomaticCollateral
+    , return = ReturnExcess
+    }
 
 
 {-| Result of the Tx finalization.
@@ -291,8 +327,7 @@ type TxFinalizationError
     | EmptyMint { policyId : String }
     | WitnessError Witness.Error
     | FailedToPerformCoinSelection CoinSelection.Error
-    | CollateralSelectionError CoinSelection.Error
-    | InvalidCollateralWithoutReturn String
+    | CollateralError CollateralFailure
     | DuplicatedMetadataTags Int
     | IncorrectTimeValidityRange String
     | UplcVmError String
@@ -322,6 +357,17 @@ type ProtocolRuleError
     | MissingCostModel Script.PlutusVersion
     | CollateralInputCountExceeded { maximum : Int, actual : Int }
     | ReferenceScriptSizeExceeded { maximum : Int, actual : Int }
+
+
+{-| Errors that may happen while selecting or validating transaction collateral.
+-}
+type CollateralFailure
+    = SelectionFailed CoinSelection.Error
+    | DuplicateInputs (List OutputReference)
+    | InputMissing OutputReference
+    | InputNotVerificationKeyControlled OutputReference
+    | NonAdaInputWithoutReturn OutputReference
+    | ReturnBelowMinAda { selectedInputs : List OutputReference, actual : Natural, required : Natural }
 
 
 {-| Provide a default function to convert an error to a human-readable string.
@@ -365,11 +411,8 @@ errorToString txFinalizationError =
         FailedToPerformCoinSelection coinSelectionError ->
             "Error while performing coin selection: " ++ CoinSelection.errorToString coinSelectionError
 
-        CollateralSelectionError coinSelectionError ->
-            "Error while performing collateral selection: " ++ CoinSelection.errorToString coinSelectionError
-
-        InvalidCollateralWithoutReturn message ->
-            "Invalid collateral without return: " ++ message
+        CollateralError collateralFailure ->
+            collateralFailureToString collateralFailure
 
         DuplicatedMetadataTags id ->
             "Duplicated metadata tag is not allowed: " ++ String.fromInt id
@@ -473,6 +516,35 @@ depositMismatchMessage kind expected actual =
 limitMessage : String -> Int -> Int -> String
 limitMessage label maximum actual =
     label ++ " exceeds the protocol maximum of " ++ String.fromInt maximum ++ "; actual: " ++ String.fromInt actual ++ "."
+
+
+collateralFailureToString : CollateralFailure -> String
+collateralFailureToString collateralFailure =
+    case collateralFailure of
+        SelectionFailed coinSelectionError ->
+            "Error while performing collateral selection: " ++ CoinSelection.errorToString coinSelectionError
+
+        DuplicateInputs references ->
+            "Invalid collateral: the following inputs are duplicated: "
+                ++ String.join ", " (List.map Utxo.refAsString references)
+
+        InputMissing reference ->
+            "Invalid collateral: the selected output " ++ Utxo.refAsString reference ++ " is absent from local state"
+
+        InputNotVerificationKeyControlled reference ->
+            "Invalid collateral: the selected output " ++ Utxo.refAsString reference ++ " must be controlled by a verification key"
+
+        NonAdaInputWithoutReturn reference ->
+            "Invalid collateral: the selected output " ++ Utxo.refAsString reference ++ " must contain only ADA when no collateral is returned"
+
+        ReturnBelowMinAda { selectedInputs, actual, required } ->
+            "Invalid collateral return: the selected inputs "
+                ++ String.join ", " (List.map Utxo.refAsString selectedInputs)
+                ++ " would return "
+                ++ Natural.toString actual
+                ++ " lovelace, but the output requires at least "
+                ++ Natural.toString required
+                ++ " lovelace"
 
 
 {-| Attempt to balance a transaction with a provided address.
@@ -722,6 +794,7 @@ finalizeSimple protocolParameters slotConfig localStateUtxos txOtherInfo txInten
         , evalScriptsCosts = evalScriptsCostsWithProtocolParameters protocolParameters slotConfig txIntents
         }
         (AutoFee { paymentSource = feeSource })
+        defaultCollateralOptions
         txOtherInfo
         txIntents
 
@@ -1043,10 +1116,11 @@ finalizeAdvanced :
     , costModels : CostModels
     }
     -> Fee
+    -> CollateralOptions
     -> List TxOtherInfo
     -> List TxIntent
     -> Result TxFinalizationError TxFinalized
-finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCosts, costModels } fee txOtherInfo txIntents =
+finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCosts, costModels } fee collateralOptions txOtherInfo txIntents =
     let
         defaultProtocolParameters =
             ProtocolParameters.defaultProtocolParameters
@@ -1059,6 +1133,7 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
         , evalScriptsCosts = evalScriptsCosts
         }
         fee
+        collateralOptions
         txOtherInfo
         txIntents
 
@@ -1078,16 +1153,17 @@ finalizeAdvancedWithProtocolParameters :
         , evalScriptsCosts : Utxo.RefDict Output -> Transaction -> Result String (List Redeemer)
         }
     -> Fee
+    -> CollateralOptions
     -> List TxOtherInfo
     -> List TxIntent
     -> Result TxFinalizationError TxFinalized
-finalizeAdvancedWithProtocolParameters protocolParameters config fee txOtherInfo txIntents =
+finalizeAdvancedWithProtocolParameters protocolParameters config fee collateralOptions txOtherInfo txIntents =
     ProtocolParameters.validate protocolParameters
         |> Result.mapError MalformedProtocolParameters
         |> Result.andThen (\_ -> validateProtocolIntents protocolParameters txIntents)
         |> Result.andThen
             (\_ ->
-                finalizeAdvancedValidated protocolParameters config fee txOtherInfo txIntents
+                finalizeAdvancedValidated protocolParameters config fee collateralOptions txOtherInfo txIntents
             )
 
 
@@ -1100,10 +1176,11 @@ finalizeAdvancedValidated :
         , evalScriptsCosts : Utxo.RefDict Output -> Transaction -> Result String (List Redeemer)
         }
     -> Fee
+    -> CollateralOptions
     -> List TxOtherInfo
     -> List TxIntent
     -> Result TxFinalizationError TxFinalized
-finalizeAdvancedValidated protocolParameters { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCosts } fee txOtherInfo txIntents =
+finalizeAdvancedValidated protocolParameters { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCosts } fee collateralOptions txOtherInfo txIntents =
     case ( processIntents govState localStateUtxos txIntents, processOtherInfo txOtherInfo ) of
         ( Err err, _ ) ->
             Err err
@@ -1164,62 +1241,57 @@ finalizeAdvancedValidated protocolParameters { govState, localStateUtxos, coinSe
                                         { selectedUtxos = List.foldl (\( ref, output ) -> Dict.Any.insert ref output) acc.selectedUtxos selectedUtxos
                                         , changeOutputs = changeOutputs ++ acc.changeOutputs
                                         }
+
+                                    selectCollateral : Result CollateralFailure CoinSelection.Selection
+                                    selectCollateral =
+                                        if Natural.isZero collateralAmount then
+                                            Ok { selectedUtxos = [], change = Nothing }
+
+                                        else
+                                            case collateralOptions.inputs of
+                                                AutomaticCollateral ->
+                                                    let
+                                                        availableUtxos =
+                                                            Dict.Any.toList localStateUtxos
+                                                                |> (case collateralOptions.return of
+                                                                        ReturnExcess ->
+                                                                            identity
+
+                                                                        NoCollateralReturn ->
+                                                                            List.filter (Tuple.second >> Utxo.isAdaOnly)
+                                                                   )
+                                                    in
+                                                    CoinSelection.collateralWith
+                                                        { adaPerUtxoByte =
+                                                            case collateralOptions.return of
+                                                                ReturnExcess ->
+                                                                    protocolParameters.adaPerUtxoByte
+
+                                                                NoCollateralReturn ->
+                                                                    -- An absent return output has no minimum-ADA requirement.
+                                                                    Natural.zero
+                                                        , maxInputCount = protocolParameters.maxCollateralInputs
+                                                        }
+                                                        (CoinSelection.CollateralContext availableUtxos collateralSources collateralAmount)
+                                                        |> Result.mapError SelectionFailed
+                                                        |> Result.andThen (validateCollateralSelection protocolParameters.adaPerUtxoByte collateralOptions.return)
+
+                                                ManualCollateral firstReference otherReferences ->
+                                                    selectManualCollateral
+                                                        { localStateUtxos = localStateUtxos
+                                                        , requiredAmount = collateralAmount
+                                                        , collateralReturn = collateralOptions.return
+                                                        , adaPerUtxoByte = protocolParameters.adaPerUtxoByte
+                                                        , maxInputCount = protocolParameters.maxCollateralInputs
+                                                        }
+                                                        (firstReference :: otherReferences)
                                 in
-                                computeCoinSelection protocolParameters.adaPerUtxoByte localStateUtxos roundFees processedIntents coinSelectionAlgo
-                                    |> Result.andThen
-                                        (\coinSelection ->
-                                            let
-                                                selectCollateral =
-                                                    case processedOtherInfo.collateralWithoutReturn of
-                                                        Nothing ->
-                                                            CoinSelection.collateralWith
-                                                                { adaPerUtxoByte = protocolParameters.adaPerUtxoByte
-                                                                , maxInputCount = protocolParameters.maxCollateralInputs
-                                                                }
-                                                                (CoinSelection.CollateralContext
-                                                                    (Dict.Any.toList localStateUtxos)
-                                                                    collateralSources
-                                                                    collateralAmount
-                                                                )
-                                                                |> Result.mapError CollateralSelectionError
-
-                                                        Just reference ->
-                                                            if Natural.isZero collateralAmount then
-                                                                Ok { selectedUtxos = [], change = Nothing }
-
-                                                            else
-                                                                case Dict.Any.get reference localStateUtxos of
-                                                                    Nothing ->
-                                                                        Err <| InvalidCollateralWithoutReturn "the selected output is absent from local state"
-
-                                                                    Just output ->
-                                                                        if not <| Utxo.isAdaOnly output then
-                                                                            Err <| InvalidCollateralWithoutReturn "the selected output must contain only ADA"
-
-                                                                        else if not <| Address.isShelleyWallet output.address then
-                                                                            Err <| InvalidCollateralWithoutReturn "the selected output must be controlled by a verification key"
-
-                                                                        else if output.amount.lovelace |> Natural.isLessThan collateralAmount then
-                                                                            Err <|
-                                                                                InvalidCollateralWithoutReturn <|
-                                                                                    "the selected output contains "
-                                                                                        ++ Natural.toString output.amount.lovelace
-                                                                                        ++ " lovelace, but at least "
-                                                                                        ++ Natural.toString collateralAmount
-                                                                                        ++ " is required"
-
-                                                                        else
-                                                                            Ok
-                                                                                { selectedUtxos = [ ( reference, output ) ]
-                                                                                , change = Nothing
-                                                                                }
-                                            in
-                                            selectCollateral
-                                                |> Result.map
-                                                    (\collateralSelection ->
-                                                        buildTx feeAmount collateralSelection processedIntents processedOtherInfo (updateTxContext coinSelection)
-                                                    )
-                                        )
+                                Result.map2
+                                    (\coinSelection collateralSelection ->
+                                        buildTx feeAmount collateralSelection processedIntents processedOtherInfo (updateTxContext coinSelection)
+                                    )
+                                    (computeCoinSelection protocolParameters.adaPerUtxoByte localStateUtxos roundFees processedIntents coinSelectionAlgo)
+                                    (Result.mapError CollateralError selectCollateral)
 
                             computeRefScriptBytesForTx tx =
                                 computeRefScriptBytes localStateUtxos (tx.body.referenceInputs ++ tx.body.inputs)
@@ -1342,6 +1414,106 @@ feeParametersFromProtocolParameters protocolParameters =
         , sizeIncrement = defaultRefScriptFeeParams.sizeIncrement
         }
     }
+
+
+selectManualCollateral :
+    { localStateUtxos : Utxo.RefDict Output
+    , requiredAmount : Natural
+    , collateralReturn : CollateralReturn
+    , adaPerUtxoByte : Natural
+    , maxInputCount : Int
+    }
+    -> List OutputReference
+    -> Result CollateralFailure CoinSelection.Selection
+selectManualCollateral { localStateUtxos, requiredAmount, collateralReturn, adaPerUtxoByte, maxInputCount } references =
+    let
+        duplicatedReferences : List OutputReference
+        duplicatedReferences =
+            references
+                |> List.Extra.gatherEqualsBy Utxo.refAsString
+                |> List.filterMap
+                    (\( reference, otherOccurrences ) ->
+                        if List.isEmpty otherOccurrences then
+                            Nothing
+
+                        else
+                            Just reference
+                    )
+
+        resolveOutput : OutputReference -> Result CollateralFailure ( OutputReference, Output )
+        resolveOutput reference =
+            Dict.Any.get reference localStateUtxos
+                |> Result.fromMaybe (InputMissing reference)
+                |> Result.map (Tuple.pair reference)
+
+        validateOutput : ( OutputReference, Output ) -> Result CollateralFailure ( OutputReference, Output )
+        validateOutput (( reference, output ) as resolvedOutput) =
+            if not <| Address.isShelleyWallet output.address then
+                Err <| InputNotVerificationKeyControlled reference
+
+            else
+                case collateralReturn of
+                    ReturnExcess ->
+                        Ok resolvedOutput
+
+                    NoCollateralReturn ->
+                        if Utxo.isAdaOnly output then
+                            Ok resolvedOutput
+
+                        else
+                            Err <| NonAdaInputWithoutReturn reference
+
+        validateSelection : List ( OutputReference, Output ) -> Result CollateralFailure CoinSelection.Selection
+        validateSelection selectedUtxos =
+            CoinSelection.inOrderedList maxInputCount
+                { availableUtxos = []
+                , alreadySelectedUtxos = selectedUtxos
+                , targetAmount = Value.onlyLovelace requiredAmount
+                }
+                |> Result.mapError SelectionFailed
+                |> Result.andThen (validateCollateralSelection adaPerUtxoByte collateralReturn)
+    in
+    if not <| List.isEmpty duplicatedReferences then
+        Err <| DuplicateInputs duplicatedReferences
+
+    else
+        references
+            |> List.map resolveOutput
+            |> Result.Extra.combine
+            |> Result.andThen (List.map validateOutput >> Result.Extra.combine)
+            |> Result.andThen validateSelection
+
+
+validateCollateralSelection : Natural -> CollateralReturn -> CoinSelection.Selection -> Result CollateralFailure CoinSelection.Selection
+validateCollateralSelection adaPerUtxoByte collateralReturn selection =
+    case ( collateralReturn, collateralReturnOutput selection ) of
+        ( ReturnExcess, Just output ) ->
+            Utxo.checkMinAdaWith adaPerUtxoByte output
+                |> Result.map (always selection)
+                |> Result.mapError
+                    (always <|
+                        ReturnBelowMinAda
+                            { selectedInputs = List.map Tuple.first selection.selectedUtxos
+                            , actual = output.amount.lovelace
+                            , required = Utxo.minAdaWith adaPerUtxoByte output
+                            }
+                    )
+
+        ( NoCollateralReturn, _ ) ->
+            Ok { selection | change = Nothing }
+
+        _ ->
+            Ok selection
+
+
+collateralReturnOutput : CoinSelection.Selection -> Maybe Output
+collateralReturnOutput selection =
+    case ( List.head selection.selectedUtxos, selection.change ) of
+        ( Just ( _, output ), Just change ) ->
+            Just (Utxo.simpleOutput output.address change)
+
+        _ ->
+            Nothing
 
 
 {-| Helper function to update the auxiliary data hash.
@@ -2578,7 +2750,6 @@ type alias ProcessedOtherInfo =
     , requiredSigners : List (Bytes CredentialHash)
     , metadata : List { tag : Natural, metadata : Metadatum }
     , timeValidityRange : Maybe { start : Int, end : Natural }
-    , collateralWithoutReturn : Maybe OutputReference
     }
 
 
@@ -2588,7 +2759,6 @@ noInfo =
     , requiredSigners = []
     , metadata = []
     , timeValidityRange = Nothing
-    , collateralWithoutReturn = Nothing
     }
 
 
@@ -2618,9 +2788,6 @@ processOtherInfo otherInfo =
                                         Just vr ->
                                             Just { start = max start vr.start, end = Natural.min end vr.end }
                             }
-
-                        TxCollateralWithoutReturn reference ->
-                            { acc | collateralWithoutReturn = Just reference }
                 )
                 noInfo
                 otherInfo
@@ -3049,16 +3216,11 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
 
         collateralReturn : Maybe Output
         collateralReturn =
-            case ( List.head collateralSelection.selectedUtxos, collateralSelection.change ) of
-                ( Just ( _, output ), Just change ) ->
-                    Just <| Utxo.simpleOutput output.address change
-
-                _ ->
-                    Nothing
+            collateralReturnOutput collateralSelection
 
         totalCollateral : Maybe Int
         totalCollateral =
-            if List.isEmpty collateralSelection.selectedUtxos then
+            if collateralReturn == Nothing then
                 Nothing
 
             else

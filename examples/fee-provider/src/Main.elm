@@ -405,6 +405,7 @@ update msg model =
                             }
                             -- Use fee provider for fees
                             (AutoFee { paymentSource = ctx.feeProvider.address })
+                            TxIntent.defaultCollateralOptions
                             []
             in
             case unlockTxAttempt of
