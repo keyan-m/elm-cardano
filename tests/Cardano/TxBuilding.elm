@@ -87,7 +87,7 @@ collateralOptionsTests =
                     False
     in
     describe "Collateral options"
-        [ test "manually selects multiple inputs without a return" <|
+        [ test "manually selects multiple inputs without a return or total collateral" <|
             \_ ->
                 case
                     finalizeWithCollateral
@@ -101,7 +101,7 @@ collateralOptionsTests =
                         Expect.equal
                             { collateral = List.map Utxo.refAsString [ aliceRef, bobRef ]
                             , collateralReturn = Nothing
-                            , totalCollateral = Just 3000000
+                            , totalCollateral = Nothing
                             , expectedSignatures =
                                 List.map (dummyCredentialHash >> Bytes.toHex) [ "key-me", "key-alice", "key-bob" ]
                                     |> List.sort
@@ -138,7 +138,7 @@ collateralOptionsTests =
                             , collateralReturn = tx.body.collateralReturn
                             , totalCollateral = tx.body.totalCollateral
                             }
-        , test "automatically selects collateral without a return" <|
+        , test "automatically selects collateral without a return or total collateral" <|
             \_ ->
                 let
                     autoRef =
@@ -159,7 +159,7 @@ collateralOptionsTests =
                         Expect.equal
                             { collateral = [ Utxo.refAsString autoRef ]
                             , collateralReturn = Nothing
-                            , totalCollateral = Just 5000000
+                            , totalCollateral = Nothing
                             }
                             { collateral = List.map Utxo.refAsString tx.body.collateral
                             , collateralReturn = tx.body.collateralReturn

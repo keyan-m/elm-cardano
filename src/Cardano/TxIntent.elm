@@ -207,6 +207,10 @@ type CollateralInputs
 
 
 {-| Configure whether excess collateral is returned.
+
+Without a return, the transaction omits the total collateral field and all
+selected collateral is at risk if script validation fails.
+
 -}
 type CollateralReturn
     = ReturnExcess
@@ -2514,7 +2518,7 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
 
         totalCollateral : Maybe Int
         totalCollateral =
-            if List.isEmpty collateralSelection.selectedUtxos then
+            if collateralReturn == Nothing then
                 Nothing
 
             else
