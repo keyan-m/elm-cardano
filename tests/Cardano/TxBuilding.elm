@@ -87,30 +87,40 @@ collateralOptionsTests =
                     False
     in
     describe "Collateral options"
-        [ test "manually selects multiple inputs without a return or total collateral" <|
-            \_ ->
+        [ testCollateralDeclaration "manually selects multiple inputs without a return" <|
+            \declareTotalCollateral ->
                 case
                     finalizeWithCollateral
                         [ aliceCollateral, bobCollateral ]
-                        (manualCollateral aliceRef [ bobRef ] NoCollateralReturn)
+                        (manualCollateral aliceRef [ bobRef ] (NoCollateralReturn { declareTotalCollateral = declareTotalCollateral }))
                 of
                     Err error ->
                         Expect.fail (Debug.toString error)
 
                     Ok { tx, expectedSignatures } ->
-                        Expect.equal
-                            { collateral = List.map Utxo.refAsString [ aliceRef, bobRef ]
-                            , collateralReturn = Nothing
-                            , totalCollateral = Nothing
-                            , expectedSignatures =
-                                List.map (dummyCredentialHash >> Bytes.toHex) [ "key-me", "key-alice", "key-bob" ]
-                                    |> List.sort
-                            }
-                            { collateral = List.map Utxo.refAsString tx.body.collateral
-                            , collateralReturn = tx.body.collateralReturn
-                            , totalCollateral = tx.body.totalCollateral
-                            , expectedSignatures = List.map Bytes.toHex expectedSignatures |> List.sort
-                            }
+                        Expect.all
+                            [ \_ ->
+                                Expect.equal
+                                    { collateral = List.map Utxo.refAsString [ aliceRef, bobRef ]
+                                    , collateralReturn = Nothing
+                                    , totalCollateral =
+                                        if declareTotalCollateral then
+                                            Just 3000000
+
+                                        else
+                                            Nothing
+                                    , expectedSignatures =
+                                        List.map (dummyCredentialHash >> Bytes.toHex) [ "key-me", "key-alice", "key-bob" ]
+                                            |> List.sort
+                                    }
+                                    { collateral = List.map Utxo.refAsString tx.body.collateral
+                                    , collateralReturn = tx.body.collateralReturn
+                                    , totalCollateral = tx.body.totalCollateral
+                                    , expectedSignatures = List.map Bytes.toHex expectedSignatures |> List.sort
+                                    }
+                            , \_ -> expectCollateralRoundTrip tx
+                            ]
+                            ()
         , test "manually selects every input and returns the excess" <|
             \_ ->
                 let
@@ -138,8 +148,8 @@ collateralOptionsTests =
                             , collateralReturn = tx.body.collateralReturn
                             , totalCollateral = tx.body.totalCollateral
                             }
-        , test "automatically selects collateral without a return or total collateral" <|
-            \_ ->
+        , testCollateralDeclaration "automatically selects collateral without a return" <|
+            \declareTotalCollateral ->
                 let
                     autoRef =
                         makeRef "auto-collateral" 0
@@ -150,21 +160,31 @@ collateralOptionsTests =
                 case
                     finalizeWithCollateral
                         [ autoCollateral ]
-                        { inputs = AutomaticCollateral, return = NoCollateralReturn }
+                        { inputs = AutomaticCollateral, return = NoCollateralReturn { declareTotalCollateral = declareTotalCollateral } }
                 of
                     Err error ->
                         Expect.fail (Debug.toString error)
 
                     Ok { tx } ->
-                        Expect.equal
-                            { collateral = [ Utxo.refAsString autoRef ]
-                            , collateralReturn = Nothing
-                            , totalCollateral = Nothing
-                            }
-                            { collateral = List.map Utxo.refAsString tx.body.collateral
-                            , collateralReturn = tx.body.collateralReturn
-                            , totalCollateral = tx.body.totalCollateral
-                            }
+                        Expect.all
+                            [ \_ ->
+                                Expect.equal
+                                    { collateral = [ Utxo.refAsString autoRef ]
+                                    , collateralReturn = Nothing
+                                    , totalCollateral =
+                                        if declareTotalCollateral then
+                                            Just 5000000
+
+                                        else
+                                            Nothing
+                                    }
+                                    { collateral = List.map Utxo.refAsString tx.body.collateral
+                                    , collateralReturn = tx.body.collateralReturn
+                                    , totalCollateral = tx.body.totalCollateral
+                                    }
+                            , \_ -> expectCollateralRoundTrip tx
+                            ]
+                            ()
         , test "returns native assets from manually selected collateral" <|
             \_ ->
                 let
@@ -235,7 +255,7 @@ collateralOptionsTests =
                 case
                     finalizeWithCollateral
                         [ aliceCollateral, carolCollateral, daveCollateral ]
-                        (manualCollateral aliceRef [ carolRef, daveRef ] NoCollateralReturn)
+                        (manualCollateral aliceRef [ carolRef, daveRef ] (NoCollateralReturn { declareTotalCollateral = False }))
                 of
                     Err error ->
                         Expect.fail (Debug.toString error)
@@ -246,7 +266,7 @@ collateralOptionsTests =
             \_ ->
                 finalizeWithCollateral
                     [ aliceCollateral, bobCollateral, carolCollateral, daveCollateral ]
-                    (manualCollateral aliceRef [ bobRef, carolRef, daveRef ] NoCollateralReturn)
+                    (manualCollateral aliceRef [ bobRef, carolRef, daveRef ] (NoCollateralReturn { declareTotalCollateral = False }))
                     |> expectFailure
                         (\error ->
                             case error of
@@ -260,7 +280,7 @@ collateralOptionsTests =
             \_ ->
                 finalizeWithCollateral
                     [ bobCollateral ]
-                    (manualCollateral bobRef [ bobRef ] NoCollateralReturn)
+                    (manualCollateral bobRef [ bobRef ] (NoCollateralReturn { declareTotalCollateral = False }))
                     |> expectFailure
                         (\error ->
                             case error of
@@ -274,7 +294,7 @@ collateralOptionsTests =
             \_ ->
                 finalizeWithCollateral
                     []
-                    (manualCollateral aliceRef [] NoCollateralReturn)
+                    (manualCollateral aliceRef [] (NoCollateralReturn { declareTotalCollateral = False }))
                     |> expectFailure
                         (\error ->
                             case error of
@@ -301,7 +321,7 @@ collateralOptionsTests =
                 in
                 finalizeWithCollateral
                     [ ( tokenRef, tokenOutput ) ]
-                    (manualCollateral tokenRef [] NoCollateralReturn)
+                    (manualCollateral tokenRef [] (NoCollateralReturn { declareTotalCollateral = False }))
                     |> expectFailure
                         (\error ->
                             case error of
@@ -336,7 +356,7 @@ collateralOptionsTests =
             \_ ->
                 finalizeWithCollateral
                     [ aliceCollateral, carolCollateral ]
-                    (manualCollateral aliceRef [ carolRef ] NoCollateralReturn)
+                    (manualCollateral aliceRef [ carolRef ] (NoCollateralReturn { declareTotalCollateral = False }))
                     |> expectFailure
                         (\error ->
                             case error of
@@ -346,8 +366,8 @@ collateralOptionsTests =
                                 _ ->
                                     False
                         )
-        , test "does not validate or add collateral when no Plutus execution requires it" <|
-            \_ ->
+        , testCollateralDeclaration "does not validate or add collateral when no Plutus execution requires it" <|
+            \declareTotalCollateral ->
                 let
                     firstMissingRef =
                         makeRef "unused-collateral" 0
@@ -363,7 +383,7 @@ collateralOptionsTests =
                 case
                     finalizeAdvanced buildingConfig
                         twoAdaFee
-                        (manualCollateral firstMissingRef [] NoCollateralReturn)
+                        (manualCollateral firstMissingRef [] (NoCollateralReturn { declareTotalCollateral = declareTotalCollateral }))
                         []
                         []
                 of
@@ -371,12 +391,17 @@ collateralOptionsTests =
                         Expect.fail (Debug.toString error)
 
                     Ok { tx } ->
-                        Expect.equal
-                            { collateral = [], collateralReturn = Nothing, totalCollateral = Nothing }
-                            { collateral = tx.body.collateral
-                            , collateralReturn = tx.body.collateralReturn
-                            , totalCollateral = tx.body.totalCollateral
-                            }
+                        Expect.all
+                            [ \_ ->
+                                Expect.equal
+                                    { collateral = [], collateralReturn = Nothing, totalCollateral = Nothing }
+                                    { collateral = tx.body.collateral
+                                    , collateralReturn = tx.body.collateralReturn
+                                    , totalCollateral = tx.body.totalCollateral
+                                    }
+                            , \_ -> expectCollateralRoundTrip tx
+                            ]
+                            ()
         ]
 
 
@@ -2220,6 +2245,29 @@ autoFee =
 
 
 -- Helper functions
+
+
+testCollateralDeclaration : String -> (Bool -> Expectation) -> Test
+testCollateralDeclaration description check =
+    describe description
+        [ test "with declaration enabled" <| \_ -> check True
+        , test "with declaration disabled" <| \_ -> check False
+        ]
+
+
+expectCollateralRoundTrip : Transaction -> Expectation
+expectCollateralRoundTrip tx =
+    let
+        collateralFields body =
+            ( List.map Utxo.refAsString body.collateral
+            , body.collateralReturn
+            , body.totalCollateral
+            )
+    in
+    Transaction.serialize tx
+        |> Transaction.deserialize
+        |> Maybe.map (.body >> collateralFields)
+        |> Expect.equal (Just (collateralFields tx.body))
 
 
 finalizeWithCollateral :

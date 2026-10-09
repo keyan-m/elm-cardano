@@ -208,13 +208,14 @@ type CollateralInputs
 
 {-| Configure whether excess collateral is returned.
 
-Without a return, the transaction omits the total collateral field and all
-selected collateral is at risk if script validation fails.
+`NoCollateralReturn` omits the collateral return output. `declareTotalCollateral`
+controls whether the selected collateral inputs’ total ADA is included in
+`totalCollateral`.
 
 -}
 type CollateralReturn
     = ReturnExcess
-    | NoCollateralReturn
+    | NoCollateralReturn { declareTotalCollateral : Bool }
 
 
 {-| Collateral configuration for transaction finalization.
@@ -955,7 +956,7 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                                                             ReturnExcess ->
                                                                 identity
 
-                                                            NoCollateralReturn ->
+                                                            NoCollateralReturn _ ->
                                                                 List.filter (Tuple.second >> Utxo.isAdaOnly)
                                                        )
                                         in
@@ -979,7 +980,7 @@ finalizeAdvanced { govState, localStateUtxos, coinSelectionAlgo, evalScriptsCost
                             -- Aggregate with pre-selected inputs and pre-created outputs
                             updateTxContext coinSelection
                                 --> TransactionBody
-                                |> buildTx feeAmount collateralSelection processedIntents processedOtherInfo
+                                |> buildTx feeAmount collateralSelection collateralOptions.return processedIntents processedOtherInfo
                         )
                         (computeCoinSelection localStateUtxos roundFees processedIntents coinSelectionAlgo)
                         (Result.mapError CollateralError selectCollateral)
@@ -1071,7 +1072,7 @@ selectManualCollateral { localStateUtxos, requiredAmount, collateralReturn } ref
                     ReturnExcess ->
                         Ok resolvedOutput
 
-                    NoCollateralReturn ->
+                    NoCollateralReturn _ ->
                         if Utxo.isAdaOnly output then
                             Ok resolvedOutput
 
@@ -1114,7 +1115,7 @@ validateCollateralSelection collateralReturn selection =
                             }
                     )
 
-        ( NoCollateralReturn, _ ) ->
+        ( NoCollateralReturn _, _ ) ->
             Ok { selection | change = Nothing }
 
         _ ->
@@ -2280,11 +2281,12 @@ resultDictJoin dict =
 buildTx :
     Natural
     -> CoinSelection.Selection
+    -> CollateralReturn
     -> ProcessedIntents
     -> ProcessedOtherInfo
     -> TxContext
     -> TxFinalized
-buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
+buildTx feeAmount collateralSelection collateralReturnPolicy processedIntents otherInfo txContext =
     let
         -- WitnessSet ######################################
         --
@@ -2516,9 +2518,18 @@ buildTx feeAmount collateralSelection processedIntents otherInfo txContext =
         collateralReturn =
             collateralReturnOutput collateralSelection
 
+        includeTotalCollateral : Bool
+        includeTotalCollateral =
+            case collateralReturnPolicy of
+                ReturnExcess ->
+                    collateralReturn /= Nothing
+
+                NoCollateralReturn { declareTotalCollateral } ->
+                    declareTotalCollateral
+
         totalCollateral : Maybe Int
         totalCollateral =
-            if collateralReturn == Nothing then
+            if List.isEmpty collateralSelection.selectedUtxos || not includeTotalCollateral then
                 Nothing
 
             else
